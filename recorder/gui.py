@@ -225,37 +225,22 @@ class RecorderGUI:
         )
         self.settings_btn.pack(side="left", padx=(2, 0))
 
-        # Monitor picker — only meaningful with multiple displays, but the
-        # combobox is always shown so the user can confirm what's recorded.
+        # Capture target picker — unified Monitor + Target window list.
+        # Monitor entries record the whole display; window entries enable
+        # Model B (window-relative coords + window-cropped screenshots).
+        # Refreshed on click so the live window list is always current.
         self._monitors: list[Monitor] = list_monitors()
-        tk.Label(row, text="Monitor:", font=(FONT_FAMILY, 9),
+        tk.Label(row, text="Capture:", font=(FONT_FAMILY, 9),
                  bg=COLORS["bg"], fg=COLORS["text_secondary"]).pack(
             side="left", padx=(12, 4))
-        self.monitor_var = tk.StringVar()
-        self.monitor_combo = ttk.Combobox(
-            row, textvariable=self.monitor_var, state="readonly",
-            width=24, font=(FONT_FAMILY, 9),
-            values=[m.label for m in self._monitors],
+        self.capture_var = tk.StringVar()
+        self.capture_combo = ttk.Combobox(
+            row, textvariable=self.capture_var, state="readonly",
+            width=38, font=(FONT_FAMILY, 9),
         )
-        # Default to primary (which list_monitors guarantees is index 0).
-        if self._monitors:
-            self.monitor_combo.current(0)
-        self.monitor_combo.pack(side="left")
-
-        # Target window picker (Model B). The values are rebuilt on click
-        # via _refresh_target_choices() so the user always sees the live
-        # set of visible top-level windows.
-        tk.Label(row, text="Target window:", font=(FONT_FAMILY, 9),
-                 bg=COLORS["bg"], fg=COLORS["text_secondary"]).pack(
-            side="left", padx=(12, 4))
-        self.target_var = tk.StringVar()
-        self.target_combo = ttk.Combobox(
-            row, textvariable=self.target_var, state="readonly",
-            width=32, font=(FONT_FAMILY, 9),
-        )
-        self.target_combo.pack(side="left")
-        self.target_combo.bind("<Button-1>", lambda _e: self._refresh_target_choices())
-        self._refresh_target_choices(initial=True)
+        self.capture_combo.pack(side="left")
+        self.capture_combo.bind("<Button-1>", lambda _e: self._refresh_capture_choices())
+        self._refresh_capture_choices(initial=True)
 
     def _build_info_bar(self, parent: tk.Frame) -> None:
         """Row 3: Step counter + event type + action description."""
@@ -382,18 +367,22 @@ class RecorderGUI:
         self.browse_btn.config(state="normal" if idle else "disabled")
         if hasattr(self, "settings_btn"):
             self.settings_btn.config(state="normal" if idle else "disabled")
-        if hasattr(self, "monitor_combo"):
-            self.monitor_combo.config(state="readonly" if idle else "disabled")
-        if hasattr(self, "target_combo"):
-            self.target_combo.config(state="readonly" if idle else "disabled")
+        if hasattr(self, "capture_combo"):
+            self.capture_combo.config(state="readonly" if idle else "disabled")
         self._update_nav_buttons()
 
     def _selected_monitor(self) -> Optional[Monitor]:
+        """The monitor implied by the current capture choice.
+
+        Monitor mode → that monitor. Window mode (or unresolved) →
+        primary monitor as a sensible fallback for overlay placement
+        and playback cropping.
+        """
         if not getattr(self, "_monitors", None):
             return None
-        idx = self.monitor_combo.current()
-        if 0 <= idx < len(self._monitors):
-            return self._monitors[idx]
+        kind, value = self._resolve_capture_choice()
+        if kind == "monitor" and value is not None:
+            return value
         return self._monitors[0]
 
     def _monitor_for_recording(self, recording: Optional[Recording]) -> Optional[Monitor]:
@@ -442,15 +431,20 @@ class RecorderGUI:
             self.prev_btn.config(state="disabled")
             self.next_btn.config(state="disabled")
 
-    # ── Target window helpers ─────────────────────────────────────────
+    # ── Capture target helpers (unified Monitor + Window picker) ──────
 
-    _TARGET_NONE_LABEL = "(none — record whole monitor)"
+    _MONITOR_PREFIX = "🖥 "
+    _WINDOW_PREFIX = "🪟 "
+
+    def _monitor_label(self, m: Monitor) -> str:
+        tag = " (Primary)" if m.is_primary else ""
+        return f"{self._MONITOR_PREFIX}Monitor {m.index + 1}: {m.width}×{m.height}{tag}"
 
     def _settings_target_label(self) -> Optional[str]:
         title = (_cfg_module.TARGET_WINDOW_TITLE_CONTAINS or "").strip()
         if not title:
             return None
-        return f"(from settings: {title!r})"
+        return f"{self._WINDOW_PREFIX}(from settings: {title!r})"
 
     def _enumerate_visible_windows(self) -> list[tuple[int, str]]:
         """Return [(hwnd, title)] for visible top-level windows with a
@@ -481,46 +475,68 @@ class RecorderGUI:
         out.sort(key=lambda h_t: h_t[1].lower())
         return out
 
-    def _refresh_target_choices(self, *, initial: bool = False) -> None:
-        """Rebuild the Target window combobox values."""
-        current = self.target_var.get()
-        choices: list[str] = [self._TARGET_NONE_LABEL]
+    def _refresh_capture_choices(self, *, initial: bool = False) -> None:
+        """Rebuild the unified Capture combobox values."""
+        current = self.capture_var.get()
+        choices: list[str] = [self._monitor_label(m) for m in self._monitors]
         settings_label = self._settings_target_label()
         if settings_label:
             choices.append(settings_label)
         for _hwnd, title in self._enumerate_visible_windows():
-            label = f"{title}"
+            label = f"{self._WINDOW_PREFIX}{title}"
             if label not in choices:
                 choices.append(label)
-        self.target_combo["values"] = choices
+        self.capture_combo["values"] = choices
+
+        def _default_index() -> int:
+            # Prefer the configured target window; otherwise primary monitor.
+            if settings_label and settings_label in choices:
+                return choices.index(settings_label)
+            return 0
+
         if initial:
-            # Default: settings target if present, else "(none)".
-            self.target_combo.current(1 if settings_label else 0)
+            self.capture_combo.current(_default_index())
             return
         if current and current in choices:
-            self.target_combo.set(current)
+            self.capture_combo.set(current)
         elif current:
-            # Selection no longer present (window closed); fall back.
-            self.target_combo.current(1 if settings_label else 0)
+            # Previous selection vanished (window closed); fall back.
+            self.capture_combo.current(_default_index())
 
-    def _resolve_selected_target(self) -> Optional[TargetWindow]:
-        """Translate the dropdown selection into a TargetWindow (or None
-        for monitor mode)."""
-        selection = (self.target_var.get() or "").strip()
-        if not selection or selection == self._TARGET_NONE_LABEL:
-            return None
-        settings_label = self._settings_target_label()
-        if settings_label and selection == settings_label:
-            title = (_cfg_module.TARGET_WINDOW_TITLE_CONTAINS or "").strip()
-        else:
-            # Use the literal title as the title_contains substring.
-            title = selection
-        if not title:
-            return None
-        try:
-            return TargetWindow(title)
-        except ValueError:
-            return None
+    def _resolve_capture_choice(self) -> tuple[str, object]:
+        """Translate the dropdown selection into a tagged value.
+
+        Returns one of:
+          ("monitor", Monitor)        — whole-monitor capture
+          ("window",  TargetWindow)   — Model B window-relative capture
+          ("monitor", primary)        — fallback when nothing matches
+        """
+        selection = (self.capture_var.get() or "").strip()
+        primary = self._monitors[0] if self._monitors else None
+
+        # Monitor entries.
+        for m in self._monitors:
+            if selection == self._monitor_label(m):
+                return ("monitor", m)
+
+        # Window entries.
+        if selection.startswith(self._WINDOW_PREFIX):
+            label_body = selection[len(self._WINDOW_PREFIX):]
+            settings_label_body = None
+            settings_full = self._settings_target_label()
+            if settings_full:
+                settings_label_body = settings_full[len(self._WINDOW_PREFIX):]
+            if settings_label_body and label_body == settings_label_body:
+                title = (_cfg_module.TARGET_WINDOW_TITLE_CONTAINS or "").strip()
+            else:
+                title = label_body
+            if title:
+                try:
+                    return ("window", TargetWindow(title))
+                except ValueError:
+                    pass
+
+        return ("monitor", primary)
 
     # ── Recording actions ─────────────────────────────────────────────
 
@@ -528,10 +544,13 @@ class RecorderGUI:
         name = self.name_var.get().strip() or None
         self._browse_recording = None
         self._playback_snapshots = []
-        monitor = self._selected_monitor()
 
-        target = self._resolve_selected_target()
-        if target is not None:
+        kind, value = self._resolve_capture_choice()
+        monitor: Optional[Monitor] = None
+        target: Optional[TargetWindow] = None
+
+        if kind == "window" and isinstance(value, TargetWindow):
+            target = value
             launch_uri = (_cfg_module.TARGET_WINDOW_AUTO_LAUNCH_URI or "").strip()
             if launch_uri:
                 try:
@@ -551,18 +570,25 @@ class RecorderGUI:
                     "Target window not found",
                     f"Could not find a visible window matching "
                     f"{target.title_contains!r}.\n\n"
-                    f"Open the app first or pick a different target.",
+                    f"Open the app first or pick a different capture target.",
                 )
                 return
             try:
                 target.focus()
             except Exception as exc:
                 print(f"[warn] target focus failed: {exc}")
+            # Overlay still needs a monitor — pick the one the window
+            # currently sits on (best-effort: primary).
+            monitor = self._monitors[0] if self._monitors else None
+        else:
+            monitor = value if isinstance(value, Monitor) else (
+                self._monitors[0] if self._monitors else None
+            )
 
-        # Re-bind the recorder's target_window per run so monitor and
-        # Model B modes can be toggled without restarting the app.
+        # Re-bind the recorder per run so monitor and Model B modes can
+        # be toggled without restarting the app.
         self.recorder.target_window = target
-        self.recorder.monitor = monitor
+        self.recorder.monitor = monitor if target is None else None
         self._active_target_window = target
 
         self.recorder.start(name=name)
