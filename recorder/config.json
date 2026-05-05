@@ -1,0 +1,18 @@
+{
+  "playback": {
+    "pyautogui_pause": 0.05,
+    "sleep_increment": 0.1
+  },
+  "recording": {
+    "worker_join_timeout": 5.0,
+    "screenshot_hash_length": 16,
+    "post_inject_settle_seconds": 0.1,
+    "text_buffer_idle_flush_seconds": 1.5
+  },
+  "application": {
+    "window_title": "RemoteGaze Recorder",
+    "stop_hotkey": "f6",
+    "recordings_dir_name": "recordings",
+    "info_wraplength": 800
+  }
+}

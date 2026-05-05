@@ -1,0 +1,3 @@
+pyautogui>=0.9.54
+pynput>=1.7.6
+Pillow>=10.0.0

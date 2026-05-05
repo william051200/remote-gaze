@@ -1,0 +1,69 @@
+"""Data models for recorded events and recordings."""
+
+import json
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from typing import Optional
+
+
+@dataclass
+class RecordedEvent:
+    step: int
+    type: str  # "mouse_click" | "type_text" | "key_press" | "hotkey"
+    timestamp: float  # seconds since recording start
+    delay_from_previous: float
+    screenshot: str  # hash key referencing Recording.screenshots
+    x: Optional[int] = None
+    y: Optional[int] = None
+    button: Optional[str] = None  # "left", "right", "middle"
+    key: Optional[str] = None
+    text: Optional[str] = None  # for "type_text" events: the buffered text run
+    # Modifier keys held when the event fired. Used by:
+    #   - "hotkey":      modifiers + key form the chord (e.g. ctrl + s)
+    #   - "mouse_click": modifiers held during the click (e.g. shift+click)
+    # Canonical names: ctrl, alt, shift, win.
+    modifiers: Optional[list] = None
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        return {k: v for k, v in d.items() if v is not None}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "RecordedEvent":
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class Recording:
+    name: str
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat())
+    events: list = field(default_factory=list)
+    screenshots: dict = field(default_factory=dict)  # hash → base64 PNG
+    # Optional metadata describing the monitor that was recorded. Lets the
+    # player (eventually) re-target a different display, and lets us warn
+    # if the geometry has changed since recording. Backward-compatible:
+    # older recordings without this field load with monitor=None.
+    monitor: Optional[dict] = None
+
+    def to_json(self) -> str:
+        payload = {
+            "name": self.name,
+            "created_at": self.created_at,
+            "screenshots": self.screenshots,
+            "events": [e.to_dict() for e in self.events],
+        }
+        if self.monitor is not None:
+            payload["monitor"] = self.monitor
+        return json.dumps(payload, indent=2)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> "Recording":
+        data = json.loads(json_str)
+        events = [RecordedEvent.from_dict(e) for e in data.get("events", [])]
+        return cls(
+            name=data["name"],
+            created_at=data["created_at"],
+            events=events,
+            screenshots=data.get("screenshots", {}),
+            monitor=data.get("monitor"),
+        )
