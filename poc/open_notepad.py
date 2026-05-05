@@ -66,6 +66,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Text to type into Start search after opening it.",
     )
     parser.add_argument(
+        "--write-text",
+        default="hello world",
+        help="Text to type into the launched app. Set to empty string to skip.",
+    )
+    parser.add_argument(
         "--start-wait",
         type=float,
         default=0.8,
@@ -76,6 +81,12 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=2.5,
         help="Seconds to wait after Enter before screenshotting (let the app open).",
+    )
+    parser.add_argument(
+        "--write-wait",
+        type=float,
+        default=0.5,
+        help="Seconds to wait after the launched app appears before typing into it.",
     )
     parser.add_argument(
         "--out",
@@ -126,6 +137,12 @@ def main(argv: list[str] | None = None) -> int:
     print("[info] pressing Enter")
     pyautogui.press("enter")
     time.sleep(args.launch_wait)
+
+    if args.write_text:
+        time.sleep(args.write_wait)
+        print(f"[info] typing into launched app: {args.write_text!r}")
+        pyautogui.typewrite(args.write_text, interval=0.04)
+        time.sleep(0.4)
 
     saved = screenshot_region(rect, out_path)
     print(f"[info] saved screenshot: {saved}")
