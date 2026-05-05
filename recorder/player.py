@@ -13,6 +13,12 @@ from .utils import load_recording
 from .config import PYAUTOGUI_PAUSE
 from . import config
 from .key_mappings import PYNPUT_TO_PYAUTOGUI
+from .target_window import TargetWindow
+
+# Win-key names (raw pynput names + pyautogui name) that should be routed
+# through gaze.session.open_remote_start("win") so they get the 80 ms hold
+# Windows App's RDP needs to forward them to the remote session.
+_WIN_KEY_NAMES = {"cmd", "cmd_l", "cmd_r", "winleft", "winright"}
 
 # Disable pyautogui fail-safe pause for smoother playback
 pyautogui.PAUSE = PYAUTOGUI_PAUSE
@@ -87,6 +93,43 @@ class EventPlayer:
 
     def _playback_loop(self, recording: Recording) -> None:
         total = len(recording.events)
+        # Model B setup: if the recording is window-relative, find the
+        # session window once at the start, focus it, and warm-up click
+        # so Windows App routes keyboard input to the remote desktop.
+        target: Optional[TargetWindow] = None
+        if recording.window_relative and recording.window_title_contains:
+            target = TargetWindow(recording.window_title_contains)
+            if not target.refresh():
+                print(
+                    f"[player] target window matching "
+                    f"{recording.window_title_contains!r} not found - "
+                    f"playback aborted"
+                )
+                self._running = False
+                if self.on_complete:
+                    self.on_complete()
+                return
+            target.focus()
+            time.sleep(0.3)
+            # Warm-up click in the center of the window so Windows App
+            # gives the remote desktop keyboard focus. Without this, the
+            # first Win-key/Alt-Home goes to the container chrome.
+            cx = (target.rect[0] + target.rect[2]) // 2
+            cy = (target.rect[1] + target.rect[3]) // 2
+            _native_click(cx, cy, "left")
+            time.sleep(0.4)
+            # Warn if the window is a different size than at record time;
+            # rel coords still apply, but UI elements may have shifted.
+            if recording.window_size_at_record:
+                rec_w, rec_h = recording.window_size_at_record
+                cur_w, cur_h = target.size or (0, 0)
+                if (rec_w, rec_h) != (cur_w, cur_h):
+                    print(
+                        f"[player] WARN session window is {cur_w}x{cur_h}, "
+                        f"recording was {rec_w}x{rec_h}; click positions "
+                        f"may not line up"
+                    )
+
         try:
             for event in recording.events:
                 if self._stop_flag.is_set():
@@ -103,7 +146,7 @@ class EventPlayer:
                 if self._stop_flag.is_set():
                     break
 
-                self._execute_event(event)
+                self._execute_event(event, target)
 
                 # Match the recorder's settle-then-screenshot timing so the
                 # GUI's "current" snapshot lines up with the "expected" one.
@@ -126,19 +169,26 @@ class EventPlayer:
         return _PYNPUT_TO_PYAUTOGUI.get(key_name, key_name)
 
     @staticmethod
-    def _execute_event(event: RecordedEvent) -> None:
+    def _execute_event(event: RecordedEvent, target: Optional[TargetWindow] = None) -> None:
         if event.type == "mouse_click":
             button = event.button or "left"
             if event.x is None or event.y is None:
                 return
+            # Model B: stored coords are window-relative. Refresh the
+            # rect so a window dragged between record and playback (or
+            # mid-playback) still gets clicks in the right spot.
+            click_x, click_y = event.x, event.y
+            if target is not None:
+                target.refresh()
+                click_x, click_y = target.to_absolute(event.x, event.y)
             mods = [EventPlayer._map_key(m) for m in (event.modifiers or [])]
             try:
                 for m in mods:
                     pyautogui.keyDown(m)
                 if sys.platform == "win32":
-                    _native_click(event.x, event.y, button)
+                    _native_click(click_x, click_y, button)
                 else:
-                    pyautogui.click(event.x, event.y, button=button)
+                    pyautogui.click(click_x, click_y, button=button)
             finally:
                 for m in reversed(mods):
                     try:
@@ -156,6 +206,15 @@ class EventPlayer:
 
         elif event.type == "key_press":
             if not event.key:
+                return
+            # Win-key needs an 80ms hold to be forwarded by Windows App
+            # to the remote session. Plain pyautogui.press is too fast.
+            if event.key in _WIN_KEY_NAMES:
+                try:
+                    from gaze import session as gaze_session
+                    gaze_session.open_remote_start("win")
+                except Exception:
+                    pyautogui.press("winleft")
                 return
             try:
                 pyautogui.press(EventPlayer._map_key(event.key))

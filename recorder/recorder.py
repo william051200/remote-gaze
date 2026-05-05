@@ -78,6 +78,7 @@ class EventRecorder:
         ignore_window_hwnd: Optional[int] = None,
         ignore_keys: Optional[set] = None,
         monitor: Optional["Monitor"] = None,
+        target_window: Optional["TargetWindow"] = None,
     ):
         self.output_base_dir = output_base_dir
         self.on_event = on_event
@@ -89,6 +90,11 @@ class EventRecorder:
         # Optional monitor scoping: when set, screenshots are cropped to
         # this monitor's region and clicks outside it are ignored.
         self.monitor = monitor
+        # Optional Model B target: when set, mouse coords are stored
+        # relative to this window, screenshots are cropped to it, and
+        # clicks outside it are dropped. Mutually exclusive with monitor
+        # scoping (target_window wins if both are set).
+        self.target_window = target_window
 
         self.recording: Optional[Recording] = None
         self._start_time: float = 0.0
@@ -140,6 +146,21 @@ class EventRecorder:
         self.recording = Recording(name=name)
         if self.monitor is not None:
             self.recording.monitor = self.monitor.to_dict()
+        # Model B: lock onto the target window NOW so all events use the
+        # same rect. If we can't find it, fall back to legacy mode for
+        # this session and warn via stdout.
+        if self.target_window is not None:
+            if self.target_window.refresh():
+                self.recording.window_relative = True
+                self.recording.window_title_contains = self.target_window.title_contains
+                w, h = self.target_window.size or (0, 0)
+                self.recording.window_size_at_record = [w, h]
+            else:
+                print(
+                    f"[recorder] target window matching "
+                    f"{self.target_window.title_contains!r} not found - "
+                    f"recording absolute screen coords instead"
+                )
         self._start_time = time.time()
         self._last_event_time = self._start_time
         self._step_counter = 0
@@ -193,9 +214,19 @@ class EventRecorder:
             return
         if not self._point_in_monitor(int(x), int(y)):
             return
+        # Model B: drop clicks outside the target window, refresh the
+        # rect on every click so dragging the window mid-recording still
+        # works, and store coords as window-relative.
+        rec_x, rec_y = int(x), int(y)
+        if self.target_window is not None and self.recording is not None \
+                and self.recording.window_relative:
+            self.target_window.refresh()
+            if not self.target_window.contains(int(x), int(y)):
+                return
+            rec_x, rec_y = self.target_window.to_relative(int(x), int(y))
         # Any mouse click ends a typing run.
         self._event_queue.put(("flush_text", None))
-        payload = {"x": int(x), "y": int(y), "button": button.name}
+        payload = {"x": rec_x, "y": rec_y, "button": button.name}
         mods = _canon_mods(self._mods_down)
         if mods:
             payload["modifiers"] = mods
@@ -399,7 +430,10 @@ class EventRecorder:
     def _capture_screenshot(self) -> str:
         try:
             region = None
-            if self.monitor is not None:
+            # Target window crops win over monitor crop when both are set.
+            if self.target_window is not None and self.target_window.rect is not None:
+                region = self.target_window.screenshot_region()
+            elif self.monitor is not None:
                 region = (self.monitor.x, self.monitor.y,
                           self.monitor.width, self.monitor.height)
             screenshot = take_screenshot(region=region)

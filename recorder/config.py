@@ -39,6 +39,16 @@ WINDOW_TITLE: str = _cfg["application"]["window_title"]
 RECORDINGS_DIR_NAME: str = _cfg["application"]["recordings_dir_name"]
 INFO_WRAPLENGTH: int = _cfg["application"]["info_wraplength"]
 
+# ── Target window (Model B: drive a remote app session window) ────────
+# Empty title_contains disables Model B and keeps legacy whole-screen
+# recording. Non-empty: events outside the matched window are dropped at
+# record time, mouse coords are stored relative to the window, and
+# playback re-targets the same window (which may have moved since).
+
+_target_cfg = _cfg.get("target_window", {})
+TARGET_WINDOW_TITLE_CONTAINS: str = _target_cfg.get("title_contains", "")
+TARGET_WINDOW_FULLSCREEN_ONLY: bool = _target_cfg.get("fullscreen_only", True)
+
 # Convert hotkey string (e.g. "f6") to pynput Key enum
 STOP_HOTKEY = getattr(kb.Key, _cfg["application"]["stop_hotkey"])
 

@@ -20,7 +20,13 @@ from .overlay import BorderOverlay
 from .monitors import list_monitors, Monitor
 from .utils import base64_to_image, take_screenshot, load_recording
 from .theme import COLORS, FONT_FAMILY, THUMBNAIL_SIZE
-from .config import WINDOW_TITLE, STOP_HOTKEY, INFO_WRAPLENGTH
+from .config import (
+    WINDOW_TITLE,
+    STOP_HOTKEY,
+    INFO_WRAPLENGTH,
+    TARGET_WINDOW_TITLE_CONTAINS,
+)
+from .target_window import TargetWindow
 
 # Shared button style applied to all action buttons
 _BTN_STYLE = {
@@ -60,6 +66,10 @@ class RecorderGUI:
             on_event=self._on_recording_event,
             ignore_window_hwnd=hwnd,
             ignore_keys={STOP_HOTKEY.name},
+            target_window=(
+                TargetWindow(TARGET_WINDOW_TITLE_CONTAINS)
+                if TARGET_WINDOW_TITLE_CONTAINS else None
+            ),
         )
         self.player = EventPlayer(
             on_step=self._on_playback_step,

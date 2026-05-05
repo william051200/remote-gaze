@@ -9,18 +9,30 @@ script can click and screenshot.
 ## Layout
 
 ```
+gaze/
+└─ session.py          shared library: DPI, window finder, focus+attach,
+                       click/type/screenshot, Win-key 80ms hold, Config
+
 poc/
-├─ devbox.py            shared library: DPI, window finder, click/type/screenshot, config
-├─ rdp_click.py         smoke test: focus + click + type + screenshot
-├─ open_notepad.py      open Start, launch Notepad, type, mouse-close, screenshot
-├─ config.example.ini   single config for ALL scripts (copy to config.ini)
-├─ requirements.txt
-└─ out/                 screenshots land here (gitignored)
+├─ rdp_click.py        smoke test: focus + click + type + screenshot
+├─ open_notepad.py     open Start, launch Notepad, type, mouse-close, screenshot
+├─ config.example.ini  single config for both scripts (copy to config.ini)
+└─ out/                screenshots land here (gitignored)
 ```
+
+`gaze/session.py` is now the single source of truth for the helpers — the
+recorder app uses the same module for Model B (see `recorder/README` once
+added).
 
 Both scripts read the same `config.ini`. CLI is intentionally minimal:
 just `--config` (and `--no-launch` for `rdp_click.py`). Tune behavior by
 editing the ini file.
+
+Install with the repo-root `requirements.txt`:
+
+```powershell
+pip install -r requirements.txt
+```
 
 ## Prerequisites
 

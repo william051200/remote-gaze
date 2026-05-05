@@ -14,5 +14,9 @@
     "stop_hotkey": "f6",
     "recordings_dir_name": "recordings",
     "info_wraplength": 800
+  },
+  "target_window": {
+    "title_contains": "",
+    "fullscreen_only": true
   }
 }
