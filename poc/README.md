@@ -57,6 +57,23 @@ python poc\rdp_click.py --config poc\config.ini
 Exit codes: `0` PASS, `2` window not found, `3` window minimized, `4`
 screenshot blank.
 
+## Open Notepad on the devbox (extra script)
+
+`poc/open_notepad.py` chains: focus session window \u2192 open remote Start menu
+\u2192 type "notepad" \u2192 Enter \u2192 screenshot. Useful as a second smoke test.
+
+```powershell
+# Default: sends the Win key. ONLY works if Windows App is FULLSCREEN
+# (otherwise the laptop OS captures Win and opens the local Start menu).
+python poc\open_notepad.py --config poc\config.ini
+
+# Windowed Windows App? Use the Alt+Home RDP shortcut instead:
+python poc\open_notepad.py --config poc\config.ini --start-method alt-home
+```
+
+Saves `poc\out\notepad_after.png`. Open it to confirm Notepad opened on the
+devbox.
+
 ## Caveats this POC does NOT solve
 
 These are documented on purpose — surfacing them is the point of the POC.
