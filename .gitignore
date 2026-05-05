@@ -8,3 +8,8 @@ __pycache__/
 # POC outputs
 poc/out/*.png
 agent_poc/client/out/*.png
+
+# Local secrets-bearing config files (use *.example.ini for templates)
+config.ini
+poc/config.ini
+agent_poc/config.ini
