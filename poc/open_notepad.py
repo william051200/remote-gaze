@@ -1,22 +1,13 @@
-"""POC step 2: open Notepad on the devbox by sending Start-menu keys.
+"""Open Notepad on the devbox via Start, type some text, then mouse-close it.
 
-Sequence:
-  1. Find + focus the Windows App session window.
-  2. Press the Start-menu key (Win, or Alt+Home as fallback).
-  3. Type the app name (default "notepad").
-  4. Press Enter.
-  5. Wait, screenshot the session region, save to disk.
+All settings live in poc/config.ini under [notepad] and [timing].
+Usage:
+    python poc/open_notepad.py                       # uses poc/config.ini
+    python poc/open_notepad.py --config other.ini
 
-Important about the Windows / Start key:
-  Windows App (and mstsc) only forwards the Win key to the remote session
-  when the client is FULLSCREEN. In a windowed session the laptop OS
-  captures Win and opens the LOCAL Start menu. Two ways around this:
-    * Put Windows App in fullscreen before running this script, OR
-    * Use --start-method alt-home (RDP shortcut for "open remote Start").
-
-Run:
-  python poc\\open_notepad.py --config poc\\config.ini
-  python poc\\open_notepad.py --config poc\\config.ini --start-method alt-home
+Notes on the Start key:
+    [notepad] start_method = win        works only when Windows App is FULLSCREEN
+    [notepad] start_method = alt-home   works in windowed Windows App too (RDP shortcut)
 """
 
 from __future__ import annotations
@@ -25,170 +16,70 @@ import argparse
 import time
 from pathlib import Path
 
-# rdp_click runs DPI setup at import; keep this import first.
-from rdp_click import (
-    find_session_window,
-    focus_window,
-    get_window_rect,
-    load_config,
-    screenshot_region,
-    _looks_blank,
-)
-
-import pyautogui
-
-pyautogui.FAILSAFE = False
-
-
-def open_start(method: str) -> None:
-    if method == "win":
-        # 'winleft' is pyautogui's name for the left Windows key.
-        pyautogui.press("winleft")
-    elif method == "alt-home":
-        pyautogui.hotkey("alt", "home")
-    else:
-        raise ValueError(f"unknown start method: {method}")
+import devbox
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="poc/config.ini")
-    parser.add_argument(
-        "--start-method",
-        choices=["win", "alt-home"],
-        default="win",
-        help="How to open the remote Start menu. Use 'alt-home' if Windows "
-        "App is windowed (Win key would otherwise hit the laptop instead).",
-    )
-    parser.add_argument(
-        "--app-name",
-        default="notepad",
-        help="Text to type into Start search after opening it.",
-    )
-    parser.add_argument(
-        "--write-text",
-        default="hello world",
-        help="Text to type into the launched app. Set to empty string to skip.",
-    )
-    parser.add_argument(
-        "--start-wait",
-        type=float,
-        default=0.8,
-        help="Seconds to wait after opening the Start menu before typing.",
-    )
-    parser.add_argument(
-        "--launch-wait",
-        type=float,
-        default=2.5,
-        help="Seconds to wait after Enter before screenshotting (let the app open).",
-    )
-    parser.add_argument(
-        "--write-wait",
-        type=float,
-        default=0.5,
-        help="Seconds to wait after the launched app appears before typing into it.",
-    )
-    parser.add_argument(
-        "--close-x",
-        type=int,
-        default=500,
-        help="X coord (RELATIVE to session window top-left) to click after writing, "
-        "to close Notepad. Set to a negative value to skip the close click.",
-    )
-    parser.add_argument(
-        "--close-y",
-        type=int,
-        default=500,
-        help="Y coord (RELATIVE to session window top-left) to click after writing.",
-    )
-    parser.add_argument(
-        "--close-wait",
-        type=float,
-        default=0.5,
-        help="Seconds to wait between writing and the close click.",
-    )
-    parser.add_argument(
-        "--out",
-        default=None,
-        help="Where to save the post-launch screenshot. "
-        "Defaults to <config screenshot dir>/notepad_after.png.",
-    )
     args = parser.parse_args(argv)
 
-    cfg = load_config(Path(args.config))
-    title_needle = cfg["connection"]["window_title_contains"].strip()
-    focus_delay = cfg.getfloat("timing", "focus_delay")
+    cfg = devbox.load_config(Path(args.config))
+    _, rect = devbox.focus_session(cfg)
 
-    if args.out:
-        out_path = Path(args.out)
-    else:
-        cfg_shot = Path(cfg["output"]["screenshot_path"])
-        out_path = cfg_shot.with_name("notepad_after.png")
-
-    print(f"[info] looking for window matching: {title_needle!r}")
-    hwnd = find_session_window(title_needle)
-    if hwnd is None:
-        print(f"[FAIL] no visible window title contains {title_needle!r}.")
-        return 2
-
-    focus_window(hwnd)
-    time.sleep(focus_delay)
-    rect = get_window_rect(hwnd)
-    print(f"[info] focused hwnd={hwnd} rect={rect}")
-    if rect[2] - rect[0] < 50 or rect[3] - rect[1] < 50:
-        print("[FAIL] window rect tiny; is the session minimized?")
-        return 3
-
-    print(f"[info] opening Start via method={args.start_method!r}")
-    if args.start_method == "win":
-        print(
-            "       NOTE: this only reaches the devbox if Windows App is "
-            "FULLSCREEN. If Notepad opens on the laptop instead, rerun "
-            "with --start-method alt-home."
-        )
-    open_start(args.start_method)
-    time.sleep(args.start_wait)
-
-    print(f"[info] typing {args.app_name!r}")
-    pyautogui.typewrite(args.app_name, interval=0.05)
+    # Click inside the session FIRST so the remote desktop captures keyboard
+    # input. Without this, window-level focus isn't enough - Windows App
+    # routes keys to the container chrome and the Start key never reaches
+    # the devbox. Click coords are configured via [action] click_x/click_y.
+    warmup_x, warmup_y = devbox.relative_to_absolute(rect, cfg.click_x, cfg.click_y)
+    print(f"[info] warm-up click inside session at ({warmup_x},{warmup_y})")
+    devbox.click_at(warmup_x, warmup_y)
     time.sleep(0.4)
 
-    print("[info] pressing Enter")
-    pyautogui.press("enter")
-    time.sleep(args.launch_wait)
+    print(f"[info] opening remote Start via method={cfg.start_method!r}")
+    if cfg.start_method == "win":
+        print(
+            "       NOTE: 'win' only reaches the devbox if Windows App is "
+            "FULLSCREEN. Switch to start_method = alt-home in config.ini "
+            "if Notepad opens on the laptop instead."
+        )
+    devbox.open_remote_start(cfg.start_method)
+    time.sleep(cfg.start_wait)
 
-    if args.write_text:
-        time.sleep(args.write_wait)
-        print(f"[info] typing into launched app: {args.write_text!r}")
-        pyautogui.typewrite(args.write_text, interval=0.04)
+    print(f"[info] typing app name {cfg.app_name!r}")
+    devbox.type_text(cfg.app_name, interval=0.05)
+    time.sleep(0.4)
+
+    print("[info] pressing Enter to launch")
+    devbox.press("enter")
+    time.sleep(cfg.launch_wait)
+
+    if cfg.write_text:
+        time.sleep(cfg.write_wait)
+        print(f"[info] typing into Notepad: {cfg.write_text!r}")
+        devbox.type_text(cfg.write_text)
         time.sleep(0.4)
 
-    if args.close_x >= 0 and args.close_y >= 0:
-        time.sleep(args.close_wait)
-        abs_x = rect[0] + args.close_x
-        abs_y = rect[1] + args.close_y
+    if cfg.close_x >= 0 and cfg.close_y >= 0:
+        time.sleep(cfg.close_wait)
+        abs_x, abs_y = devbox.relative_to_absolute(rect, cfg.close_x, cfg.close_y)
         print(
-            f"[info] mouse-click to close at relative ({args.close_x},{args.close_y}) "
-            f"-> absolute ({abs_x},{abs_y})"
+            f"[info] mouse-click to close at relative "
+            f"({cfg.close_x},{cfg.close_y}) -> absolute ({abs_x},{abs_y})"
         )
-        pyautogui.moveTo(abs_x, abs_y, duration=0.15)
-        pyautogui.click()
+        devbox.click_at(abs_x, abs_y)
         time.sleep(0.6)
+    else:
+        print("[info] close skipped (close_x or close_y is negative in config)")
 
-    saved = screenshot_region(rect, out_path)
+    saved = devbox.screenshot_region(rect, cfg.notepad_screenshot_path)
     print(f"[info] saved screenshot: {saved}")
 
-    if _looks_blank(saved):
-        print(
-            "[FAIL] screenshot is blank or single-color. "
-            "Is the session locked / minimized / occluded?"
-        )
+    if devbox.screenshot_looks_blank(saved):
+        print("[FAIL] screenshot is blank or single-color. Session locked / minimized / occluded?")
         return 4
 
-    print(
-        "[PASS] sent Win/Alt+Home + 'notepad' + Enter. "
-        "Open the screenshot and confirm Notepad is visible on the devbox."
-    )
+    print("[PASS] opened Notepad, typed text, closed via mouse click")
     return 0
 
 

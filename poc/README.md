@@ -1,20 +1,32 @@
 # POC — Drive a devbox UI from your laptop via Windows App
 
-A tiny feasibility script. Answers one question:
+A small Python POC. Treats the Microsoft **Windows App** session window on
+your laptop as a regular Windows window and drives its pixels with
+`pyautogui` + `pywin32` + `Pillow`. **No RDP protocol implementation, no
+agent on the devbox.** Whatever you can see in the Windows App window, the
+script can click and screenshot.
 
-> Can a Python script on my laptop click a button on the devbox and screenshot
-> the result back, using the existing Microsoft **Windows App** session?
+## Layout
 
-It does **not** speak the RDP protocol. It treats the Windows App session
-window as a regular top-level window on the laptop and drives its pixels via
-standard Windows APIs (`pyautogui`, `pywin32`, `Pillow`).
+```
+poc/
+├─ devbox.py            shared library: DPI, window finder, click/type/screenshot, config
+├─ rdp_click.py         smoke test: focus + click + type + screenshot
+├─ open_notepad.py      open Start, launch Notepad, type, mouse-close, screenshot
+├─ config.example.ini   single config for ALL scripts (copy to config.ini)
+├─ requirements.txt
+└─ out/                 screenshots land here (gitignored)
+```
+
+Both scripts read the same `config.ini`. CLI is intentionally minimal:
+just `--config` (and `--no-launch` for `rdp_click.py`). Tune behavior by
+editing the ini file.
 
 ## Prerequisites
 
-- Windows laptop.
-- Microsoft **Windows App** installed and signed in with your corp account.
-- The devbox connection is reachable via Windows App (today's normal flow).
-- Python 3.10+.
+- Windows laptop with Python 3.10+.
+- Microsoft **Windows App** installed and signed in.
+- The devbox is reachable via Windows App today.
 
 ## Install
 
@@ -31,71 +43,61 @@ Copy-Item poc\config.example.ini poc\config.ini
 # then edit poc\config.ini
 ```
 
-Key fields:
+The fields you'll most often touch:
 
-- `window_title_contains` — a substring of the Windows App session window
-  title (usually the devbox / Dev Box connection name).
-- `launch_uri` — optional. Best-effort launch via `ms-avd:` / `ms-rd:` URI
-  or a command like `msrdcw.exe`. Leave blank to skip launch and assume the
-  session is already open.
-- `click_x` / `click_y` — coordinates **relative to the session window's
-  top-left**. Pick something safe like an empty area of the desktop.
-- `type_text` — text to type after the click.
+| Key | What it controls |
+|---|---|
+| `[connection] window_title_contains` | Substring of the Windows App session window title. |
+| `[action] click_x` / `click_y` | Click target (relative to session window) for `rdp_click.py`. |
+| `[action] type_text` | Text typed by `rdp_click.py`. |
+| `[notepad] start_method` | `win` (only works fullscreen) or `alt-home` (works windowed too). |
+| `[notepad] write_text` | Text typed into Notepad after it opens. |
+| `[notepad] close_x` / `close_y` | Mouse-click coords (relative to session window) used to close Notepad. Tune to where the X button lands on YOUR session. Negative = skip. |
+| `[timing] *` | All wait times. Bump them up if your network is laggy. |
 
 ## Run
 
-1. Open the devbox session in Windows App. Make sure the window is **visible
-   and not minimized or locked**.
+1. Open the devbox session in Windows App. Keep the window **visible** (not
+   minimized, not locked).
 2. From the repo root:
 
 ```powershell
-python poc\rdp_click.py --config poc\config.ini
+# Smoke test - just click + type + screenshot:
+python poc\rdp_click.py
+
+# Full demo - open Notepad, type "hello world", mouse-close, screenshot:
+python poc\open_notepad.py
 ```
 
-3. Look at `poc\out\screenshot.png` for the captured region.
+Screenshots land in `poc/out/`.
 
 Exit codes: `0` PASS, `2` window not found, `3` window minimized, `4`
 screenshot blank.
 
-## Open Notepad on the devbox (extra script)
+## Coordinate model
 
-`poc/open_notepad.py` chains: focus session window \u2192 open remote Start menu
-\u2192 type "notepad" \u2192 Enter \u2192 screenshot. Useful as a second smoke test.
+Everything in `config.ini` (`click_x/y`, `close_x/y`) is **pixels relative
+to the Windows App session window's top-left**. The scripts add the
+window's screen position at runtime, so moving the Windows App window
+doesn't break your coords — only resizing or zoom changes do.
 
-```powershell
-# Default: sends the Win key. ONLY works if Windows App is FULLSCREEN
-# (otherwise the laptop OS captures Win and opens the local Start menu).
-python poc\open_notepad.py --config poc\config.ini
+## Known caveats (intentionally not solved here)
 
-# Windowed Windows App? Use the Alt+Home RDP shortcut instead:
-python poc\open_notepad.py --config poc\config.ini --start-method alt-home
-```
-
-Saves `poc\out\notepad_after.png`. Open it to confirm Notepad opened on the
-devbox.
-
-## Caveats this POC does NOT solve
-
-These are documented on purpose — surfacing them is the point of the POC.
-
-- **Session must stay visible.** If you minimize Windows App or lock the
-  laptop, the remote desktop stops rendering and screenshots go blank.
-- **Coordinates are pixel-based.** If the Windows App window moves or
-  resizes, every coordinate breaks.
-- **DPI / resolution mismatch** between laptop and devbox shifts UI
-  elements; the configured `click_x/click_y` may miss after a resolution
-  change.
-- **Network latency.** Clicks reach the devbox after a round trip; the
-  script's `settle_delay` is a blunt instrument.
-- **Some keys are intercepted by Windows App** (Ctrl+Alt+Del, Win-key
-  combos). Plain text and ordinary clicks work fine.
+- **Session must stay visible.** Minimize / lock = blank screenshots.
+- **DPI / resolution mismatch** between laptop and devbox shifts the
+  remote UI; click coords may need re-tuning when resolution changes.
+- **Network latency.** Bump the `[timing]` waits if clicks fire before the
+  remote UI is ready.
+- **Some keys are intercepted by Windows App** (Ctrl+Alt+Del, most
+  Win+`<key>` combos in windowed mode). Use `start_method = alt-home` for
+  the Start menu when not fullscreen.
 
 ## Findings
 
-_Fill in after the first real run on a devbox._
-
-- Date / devbox tested:
-- What worked:
-- What failed:
-- Surprises:
-- Next thing to try:
+- `rdp_click.py`: PASS — clicks land, screenshot saved.
+- `open_notepad.py`: PASS — Notepad opens, "hello world" typed, mouse
+  close at relative `(close_x, close_y)` from `config.ini`. Required
+  `start_method = alt-home` when Windows App was windowed.
+- `close_x` / `close_y` is resolution-sensitive — tune per session.
+  Future improvement: detect Notepad's window position via a short-lived
+  agent on the devbox, or use `Alt+F4` instead of a mouse click.
