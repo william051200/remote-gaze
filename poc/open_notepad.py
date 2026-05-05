@@ -89,6 +89,42 @@ def main(argv: list[str] | None = None) -> int:
         help="Seconds to wait after the launched app appears before typing into it.",
     )
     parser.add_argument(
+        "--close",
+        action="store_true",
+        help="After typing, close Notepad with the mouse (maximize first for "
+        "predictable X-button location, then click X, then click 'Don't save').",
+    )
+    parser.add_argument(
+        "--close-x-from-right",
+        type=int,
+        default=24,
+        help="Pixels from the RIGHT edge of the session window where the "
+        "Notepad close (X) button sits when maximized. Tune if Windows App "
+        "has different chrome.",
+    )
+    parser.add_argument(
+        "--close-y-from-top",
+        type=int,
+        default=80,
+        help="Pixels from the TOP of the session window down to the Notepad "
+        "close (X) button. Account for Windows App's title bar (often ~40px) "
+        "plus Notepad's title bar (~40px).",
+    )
+    parser.add_argument(
+        "--dont-save-x",
+        type=int,
+        default=None,
+        help="Absolute screen X for the 'Don't save' button on the unsaved "
+        "changes dialog. If unset, defaults to session-window-center + 60.",
+    )
+    parser.add_argument(
+        "--dont-save-y",
+        type=int,
+        default=None,
+        help="Absolute screen Y for the 'Don't save' button. If unset, "
+        "defaults to session-window-center.",
+    )
+    parser.add_argument(
         "--out",
         default=None,
         help="Where to save the post-launch screenshot. "
@@ -143,6 +179,38 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[info] typing into launched app: {args.write_text!r}")
         pyautogui.typewrite(args.write_text, interval=0.04)
         time.sleep(0.4)
+
+    if args.close:
+        # Maximize the active remote window so the close (X) button sits at
+        # a predictable top-right corner of the Windows App client area.
+        # Win+Up only forwards in fullscreen Windows App; Alt+Space then 'x'
+        # is the windowed-friendly equivalent (Maximize from the system menu).
+        print("[info] maximize Notepad via Alt+Space, x")
+        pyautogui.hotkey("alt", "space")
+        time.sleep(0.3)
+        pyautogui.press("x")
+        time.sleep(0.6)
+
+        # Re-read rect in case maximizing nudged anything.
+        rect = get_window_rect(hwnd)
+        close_x = rect[2] - args.close_x_from_right
+        close_y = rect[1] + args.close_y_from_top
+        print(f"[info] mouse-clicking Notepad X at ({close_x},{close_y})")
+        pyautogui.moveTo(close_x, close_y, duration=0.15)
+        pyautogui.click()
+        time.sleep(0.8)
+
+        # Notepad will pop a "Save changes?" dialog because we typed text.
+        # Click "Don't save" to discard.
+        if args.dont_save_x is not None and args.dont_save_y is not None:
+            ds_x, ds_y = args.dont_save_x, args.dont_save_y
+        else:
+            ds_x = (rect[0] + rect[2]) // 2 + 60
+            ds_y = (rect[1] + rect[3]) // 2
+        print(f"[info] mouse-clicking 'Don't save' near ({ds_x},{ds_y})")
+        pyautogui.moveTo(ds_x, ds_y, duration=0.15)
+        pyautogui.click()
+        time.sleep(0.6)
 
     saved = screenshot_region(rect, out_path)
     print(f"[info] saved screenshot: {saved}")
