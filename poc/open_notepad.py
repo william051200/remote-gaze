@@ -13,10 +13,14 @@ Notes on the Start key:
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
-import devbox
+# Make repo root importable so `from gaze import session` works when running
+# the script directly from anywhere.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from gaze import session as devbox  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
