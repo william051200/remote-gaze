@@ -101,3 +101,32 @@ class TargetWindow:
         if self.hwnd is None:
             return
         gaze_session.focus_window(self.hwnd)
+
+    # ── live status (used by the focus watcher) ───────────────────────
+
+    def is_minimized(self) -> bool:
+        """True when the cached HWND is currently iconified."""
+        if self.hwnd is None:
+            return False
+        return gaze_session.is_iconic(self.hwnd)
+
+    def is_focused(self) -> bool:
+        """True when the cached HWND owns the foreground input focus."""
+        if self.hwnd is None:
+            return False
+        return gaze_session.is_foreground(self.hwnd)
+
+    def still_valid(self) -> bool:
+        """True when a window matching `title_contains` is still around
+        and resolves to the same HWND we cached. The watcher uses this
+        to detect window-close (e.g. user closed the Windows App
+        session) without raising on transient enumeration races."""
+        if self.hwnd is None:
+            return False
+        try:
+            current = gaze_session.find_session_window(self.title_contains)
+        except Exception:
+            return True
+        if current is None:
+            return False
+        return int(current) == int(self.hwnd)

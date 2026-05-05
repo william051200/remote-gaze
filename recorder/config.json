@@ -16,7 +16,10 @@
     "info_wraplength": 800
   },
   "target_window": {
-    "title_contains": "",
-    "fullscreen_only": true
+    "title_contains": "test",
+    "fullscreen_only": true,
+    "auto_launch_uri": "",
+    "stop_on_focus_loss": true,
+    "stop_on_minimize": true
   }
 }

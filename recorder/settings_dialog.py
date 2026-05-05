@@ -23,6 +23,11 @@ _DEFAULTS = {
     "post_inject_settle_seconds": 0.1,
     "text_buffer_idle_flush_seconds": 1.5,
     "pyautogui_pause": 0.05,
+    "target_title_contains": "",
+    "target_auto_launch_uri": "",
+    "target_fullscreen_only": True,
+    "target_stop_on_focus_loss": True,
+    "target_stop_on_minimize": True,
 }
 
 
@@ -42,6 +47,11 @@ class SettingsDialog(tk.Toplevel):
         self._settle_var = tk.StringVar(value=str(config.POST_INJECT_SETTLE_SECONDS))
         self._idle_var = tk.StringVar(value=str(config.TEXT_BUFFER_IDLE_FLUSH_SECONDS))
         self._pause_var = tk.StringVar(value=str(config.PYAUTOGUI_PAUSE))
+        self._target_title_var = tk.StringVar(value=config.TARGET_WINDOW_TITLE_CONTAINS)
+        self._target_launch_var = tk.StringVar(value=config.TARGET_WINDOW_AUTO_LAUNCH_URI)
+        self._target_fullscreen_var = tk.BooleanVar(value=config.TARGET_WINDOW_FULLSCREEN_ONLY)
+        self._target_stop_focus_var = tk.BooleanVar(value=config.TARGET_WINDOW_STOP_ON_FOCUS_LOSS)
+        self._target_stop_min_var = tk.BooleanVar(value=config.TARGET_WINDOW_STOP_ON_MINIMIZE)
 
         self._build_ui()
 
@@ -105,8 +115,43 @@ class SettingsDialog(tk.Toplevel):
             row=7, column=1, sticky="w", **pad
         )
 
+        ttk.Separator(frm, orient="horizontal").grid(
+            row=8, column=0, columnspan=2, sticky="ew", pady=8
+        )
+        ttk.Label(frm, text="Target window (Model B)",
+                  font=("TkDefaultFont", 9, "bold")).grid(
+            row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 4)
+        )
+
+        ttk.Label(frm, text="Title contains:").grid(row=10, column=0, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=self._target_title_var, width=42).grid(
+            row=10, column=1, sticky="ew", **pad
+        )
+
+        ttk.Label(frm, text="Auto-launch URI/cmd:").grid(row=11, column=0, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=self._target_launch_var, width=42).grid(
+            row=11, column=1, sticky="ew", **pad
+        )
+        ttk.Label(frm, text="Optional. Examples: ms-avd:connect?... or msrdcw.exe",
+                  foreground="#888").grid(row=12, column=1, sticky="w", padx=10)
+
+        ttk.Checkbutton(
+            frm, text="Fullscreen Windows App expected (warn on Win-key otherwise)",
+            variable=self._target_fullscreen_var,
+        ).grid(row=13, column=0, columnspan=2, sticky="w", padx=10, pady=2)
+
+        ttk.Checkbutton(
+            frm, text="Stop recording when target window loses focus",
+            variable=self._target_stop_focus_var,
+        ).grid(row=14, column=0, columnspan=2, sticky="w", padx=10, pady=2)
+
+        ttk.Checkbutton(
+            frm, text="Stop recording when target window is minimized",
+            variable=self._target_stop_min_var,
+        ).grid(row=15, column=0, columnspan=2, sticky="w", padx=10, pady=2)
+
         btns = ttk.Frame(frm)
-        btns.grid(row=8, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        btns.grid(row=16, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(btns, text="Reset to defaults", command=self._reset).pack(
             side="left", padx=4
         )
@@ -142,6 +187,11 @@ class SettingsDialog(tk.Toplevel):
         self._settle_var.set(str(_DEFAULTS["post_inject_settle_seconds"]))
         self._idle_var.set(str(_DEFAULTS["text_buffer_idle_flush_seconds"]))
         self._pause_var.set(str(_DEFAULTS["pyautogui_pause"]))
+        self._target_title_var.set(_DEFAULTS["target_title_contains"])
+        self._target_launch_var.set(_DEFAULTS["target_auto_launch_uri"])
+        self._target_fullscreen_var.set(_DEFAULTS["target_fullscreen_only"])
+        self._target_stop_focus_var.set(_DEFAULTS["target_stop_on_focus_loss"])
+        self._target_stop_min_var.set(_DEFAULTS["target_stop_on_minimize"])
 
     def _parse_non_negative_float(self, raw: str, label: str) -> float:
         try:
@@ -181,6 +231,11 @@ class SettingsDialog(tk.Toplevel):
         config.POST_INJECT_SETTLE_SECONDS = settle
         config.TEXT_BUFFER_IDLE_FLUSH_SECONDS = idle
         config.PYAUTOGUI_PAUSE = pause
+        config.TARGET_WINDOW_TITLE_CONTAINS = self._target_title_var.get().strip()
+        config.TARGET_WINDOW_AUTO_LAUNCH_URI = self._target_launch_var.get().strip()
+        config.TARGET_WINDOW_FULLSCREEN_ONLY = bool(self._target_fullscreen_var.get())
+        config.TARGET_WINDOW_STOP_ON_FOCUS_LOSS = bool(self._target_stop_focus_var.get())
+        config.TARGET_WINDOW_STOP_ON_MINIMIZE = bool(self._target_stop_min_var.get())
 
         try:
             config.save_to_disk()

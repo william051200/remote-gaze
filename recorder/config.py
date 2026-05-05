@@ -48,6 +48,9 @@ INFO_WRAPLENGTH: int = _cfg["application"]["info_wraplength"]
 _target_cfg = _cfg.get("target_window", {})
 TARGET_WINDOW_TITLE_CONTAINS: str = _target_cfg.get("title_contains", "")
 TARGET_WINDOW_FULLSCREEN_ONLY: bool = _target_cfg.get("fullscreen_only", True)
+TARGET_WINDOW_AUTO_LAUNCH_URI: str = _target_cfg.get("auto_launch_uri", "")
+TARGET_WINDOW_STOP_ON_FOCUS_LOSS: bool = _target_cfg.get("stop_on_focus_loss", True)
+TARGET_WINDOW_STOP_ON_MINIMIZE: bool = _target_cfg.get("stop_on_minimize", True)
 
 # Convert hotkey string (e.g. "f6") to pynput Key enum
 STOP_HOTKEY = getattr(kb.Key, _cfg["application"]["stop_hotkey"])
@@ -85,6 +88,13 @@ def save_to_disk() -> None:
             "stop_hotkey": STOP_HOTKEY.name,
             "recordings_dir_name": RECORDINGS_DIR_NAME,
             "info_wraplength": INFO_WRAPLENGTH,
+        },
+        "target_window": {
+            "title_contains": TARGET_WINDOW_TITLE_CONTAINS,
+            "fullscreen_only": TARGET_WINDOW_FULLSCREEN_ONLY,
+            "auto_launch_uri": TARGET_WINDOW_AUTO_LAUNCH_URI,
+            "stop_on_focus_loss": TARGET_WINDOW_STOP_ON_FOCUS_LOSS,
+            "stop_on_minimize": TARGET_WINDOW_STOP_ON_MINIMIZE,
         },
     }
     _CONFIG_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")

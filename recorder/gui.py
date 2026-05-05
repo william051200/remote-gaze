@@ -20,6 +20,7 @@ from .overlay import BorderOverlay
 from .monitors import list_monitors, Monitor
 from .utils import base64_to_image, take_screenshot, load_recording
 from .theme import COLORS, FONT_FAMILY, THUMBNAIL_SIZE
+from . import config as _cfg_module
 from .config import (
     WINDOW_TITLE,
     STOP_HOTKEY,
@@ -27,6 +28,11 @@ from .config import (
     TARGET_WINDOW_TITLE_CONTAINS,
 )
 from .target_window import TargetWindow
+
+try:
+    import win32gui as _win32gui
+except Exception:
+    _win32gui = None
 
 # Shared button style applied to all action buttons
 _BTN_STYLE = {
@@ -51,6 +57,11 @@ class RecorderGUI:
         self._browse_recording: Optional[Recording] = None
         self._browse_index: int = 0
         self._playback_snapshots: list[Optional[Image.Image]] = []
+
+        # Target-window focus watcher state.
+        self._watch_after_id: Optional[str] = None
+        self._watch_focus_loss_streak: int = 0
+        self._active_target_window: Optional[TargetWindow] = None
 
         self.root = tk.Tk()
         self.root.title(WINDOW_TITLE)
@@ -231,6 +242,21 @@ class RecorderGUI:
             self.monitor_combo.current(0)
         self.monitor_combo.pack(side="left")
 
+        # Target window picker (Model B). The values are rebuilt on click
+        # via _refresh_target_choices() so the user always sees the live
+        # set of visible top-level windows.
+        tk.Label(row, text="Target window:", font=(FONT_FAMILY, 9),
+                 bg=COLORS["bg"], fg=COLORS["text_secondary"]).pack(
+            side="left", padx=(12, 4))
+        self.target_var = tk.StringVar()
+        self.target_combo = ttk.Combobox(
+            row, textvariable=self.target_var, state="readonly",
+            width=32, font=(FONT_FAMILY, 9),
+        )
+        self.target_combo.pack(side="left")
+        self.target_combo.bind("<Button-1>", lambda _e: self._refresh_target_choices())
+        self._refresh_target_choices(initial=True)
+
     def _build_info_bar(self, parent: tk.Frame) -> None:
         """Row 3: Step counter + event type + action description."""
         row = tk.Frame(parent, bg=COLORS["panel"],
@@ -358,6 +384,8 @@ class RecorderGUI:
             self.settings_btn.config(state="normal" if idle else "disabled")
         if hasattr(self, "monitor_combo"):
             self.monitor_combo.config(state="readonly" if idle else "disabled")
+        if hasattr(self, "target_combo"):
+            self.target_combo.config(state="readonly" if idle else "disabled")
         self._update_nav_buttons()
 
     def _selected_monitor(self) -> Optional[Monitor]:
@@ -414,6 +442,86 @@ class RecorderGUI:
             self.prev_btn.config(state="disabled")
             self.next_btn.config(state="disabled")
 
+    # ── Target window helpers ─────────────────────────────────────────
+
+    _TARGET_NONE_LABEL = "(none — record whole monitor)"
+
+    def _settings_target_label(self) -> Optional[str]:
+        title = (_cfg_module.TARGET_WINDOW_TITLE_CONTAINS or "").strip()
+        if not title:
+            return None
+        return f"(from settings: {title!r})"
+
+    def _enumerate_visible_windows(self) -> list[tuple[int, str]]:
+        """Return [(hwnd, title)] for visible top-level windows with a
+        non-empty title. Skips our own window."""
+        if _win32gui is None:
+            return []
+        own_hwnd = self._get_hwnd()
+        out: list[tuple[int, str]] = []
+
+        def _collect(hwnd, _):
+            try:
+                if not _win32gui.IsWindowVisible(hwnd):
+                    return True
+                title = _win32gui.GetWindowText(hwnd)
+                if not title:
+                    return True
+                if own_hwnd and int(hwnd) == int(own_hwnd):
+                    return True
+                out.append((int(hwnd), title))
+            except Exception:
+                pass
+            return True
+
+        try:
+            _win32gui.EnumWindows(_collect, None)
+        except Exception:
+            return []
+        out.sort(key=lambda h_t: h_t[1].lower())
+        return out
+
+    def _refresh_target_choices(self, *, initial: bool = False) -> None:
+        """Rebuild the Target window combobox values."""
+        current = self.target_var.get()
+        choices: list[str] = [self._TARGET_NONE_LABEL]
+        settings_label = self._settings_target_label()
+        if settings_label:
+            choices.append(settings_label)
+        for _hwnd, title in self._enumerate_visible_windows():
+            label = f"{title}"
+            if label not in choices:
+                choices.append(label)
+        self.target_combo["values"] = choices
+        if initial:
+            # Default: settings target if present, else "(none)".
+            self.target_combo.current(1 if settings_label else 0)
+            return
+        if current and current in choices:
+            self.target_combo.set(current)
+        elif current:
+            # Selection no longer present (window closed); fall back.
+            self.target_combo.current(1 if settings_label else 0)
+
+    def _resolve_selected_target(self) -> Optional[TargetWindow]:
+        """Translate the dropdown selection into a TargetWindow (or None
+        for monitor mode)."""
+        selection = (self.target_var.get() or "").strip()
+        if not selection or selection == self._TARGET_NONE_LABEL:
+            return None
+        settings_label = self._settings_target_label()
+        if settings_label and selection == settings_label:
+            title = (_cfg_module.TARGET_WINDOW_TITLE_CONTAINS or "").strip()
+        else:
+            # Use the literal title as the title_contains substring.
+            title = selection
+        if not title:
+            return None
+        try:
+            return TargetWindow(title)
+        except ValueError:
+            return None
+
     # ── Recording actions ─────────────────────────────────────────────
 
     def _start_recording(self) -> None:
@@ -421,7 +529,42 @@ class RecorderGUI:
         self._browse_recording = None
         self._playback_snapshots = []
         monitor = self._selected_monitor()
+
+        target = self._resolve_selected_target()
+        if target is not None:
+            launch_uri = (_cfg_module.TARGET_WINDOW_AUTO_LAUNCH_URI or "").strip()
+            if launch_uri:
+                try:
+                    from gaze import session as _gaze
+                    _gaze.best_effort_launch(launch_uri)
+                except Exception as exc:
+                    print(f"[warn] auto-launch failed: {exc}")
+            # Retry resolution for ~5s in case launch is still spinning up.
+            import time as _time
+            deadline = _time.monotonic() + 5.0
+            while _time.monotonic() < deadline:
+                if target.refresh():
+                    break
+                _time.sleep(0.25)
+            if target.hwnd is None:
+                messagebox.showerror(
+                    "Target window not found",
+                    f"Could not find a visible window matching "
+                    f"{target.title_contains!r}.\n\n"
+                    f"Open the app first or pick a different target.",
+                )
+                return
+            try:
+                target.focus()
+            except Exception as exc:
+                print(f"[warn] target focus failed: {exc}")
+
+        # Re-bind the recorder's target_window per run so monitor and
+        # Model B modes can be toggled without restarting the app.
+        self.recorder.target_window = target
         self.recorder.monitor = monitor
+        self._active_target_window = target
+
         self.recorder.start(name=name)
         self._set_mode("● Recording", step_text="Steps: 0")
         self.event_info_var.set("")
@@ -430,7 +573,12 @@ class RecorderGUI:
         self.root.iconify()
         self._record_overlay.show(monitor=monitor)
 
-    def _stop_recording(self) -> None:
+        if target is not None:
+            self._watch_focus_loss_streak = 0
+            self._schedule_target_watch()
+
+    def _stop_recording(self, *, reason: Optional[str] = None) -> None:
+        self._cancel_target_watch()
         try:
             json_path = self.recorder.stop()
         except Exception as exc:
@@ -443,16 +591,79 @@ class RecorderGUI:
             return
         self._record_overlay.hide()
         self.root.deiconify()
-        self._set_mode("Idle")
+        self._active_target_window = None
+        if reason:
+            self._set_mode("Idle", info=f"Recording stopped: {reason}")
+        else:
+            self._set_mode("Idle")
         self._draw_placeholder(self.expected_canvas, "No recording loaded")
         self._draw_placeholder(self.current_canvas, "Not playing")
 
         if json_path:
             self.last_recording_path = json_path
             self.name_var.set(json_path.stem)
-            self.info_var.set(f"Saved: {json_path.name}")
-            messagebox.showinfo("Recording Saved",
-                                f"Recording saved to:\n{json_path}")
+            suffix = f" ({reason})" if reason else ""
+            self.info_var.set(f"Saved: {json_path.name}{suffix}")
+            messagebox.showinfo(
+                "Recording Saved",
+                f"Recording saved to:\n{json_path}"
+                + (f"\n\nStop reason: {reason}" if reason else ""),
+            )
+
+    # ── Target window watcher ─────────────────────────────────────────
+
+    _WATCH_INTERVAL_MS = 400
+
+    def _schedule_target_watch(self) -> None:
+        if self._closing:
+            return
+        if not self.recorder.is_running:
+            return
+        self._watch_after_id = self.root.after(
+            self._WATCH_INTERVAL_MS, self._watch_target_window
+        )
+
+    def _cancel_target_watch(self) -> None:
+        if self._watch_after_id is not None:
+            try:
+                self.root.after_cancel(self._watch_after_id)
+            except Exception:
+                pass
+            self._watch_after_id = None
+        self._watch_focus_loss_streak = 0
+
+    def _watch_target_window(self) -> None:
+        """Tk after-loop tick: stop recording on minimize / focus loss /
+        window close. Focus loss requires two consecutive ticks to absorb
+        transient overlays raised by the Windows App."""
+        self._watch_after_id = None
+        target = self._active_target_window
+        if target is None or not self.recorder.is_running:
+            return
+
+        try:
+            if not target.still_valid():
+                self._stop_recording(reason="target window closed")
+                return
+
+            if (_cfg_module.TARGET_WINDOW_STOP_ON_MINIMIZE
+                    and target.is_minimized()):
+                self._stop_recording(reason="target window minimized")
+                return
+
+            if _cfg_module.TARGET_WINDOW_STOP_ON_FOCUS_LOSS:
+                if target.is_focused():
+                    self._watch_focus_loss_streak = 0
+                else:
+                    self._watch_focus_loss_streak += 1
+                    if self._watch_focus_loss_streak >= 2:
+                        self._stop_recording(reason="target window lost focus")
+                        return
+        except Exception as exc:
+            # Don't kill the watcher on a transient error.
+            print(f"[warn] target watcher tick failed: {exc}")
+
+        self._schedule_target_watch()
 
     def _on_recording_event(self, event: RecordedEvent) -> None:
         if self._closing:
@@ -676,6 +887,7 @@ class RecorderGUI:
 
     def _on_close(self) -> None:
         self._closing = True
+        self._cancel_target_watch()
         if hasattr(self, '_hotkey_listener'):
             self._hotkey_listener.stop()
         if self.recorder.is_running:

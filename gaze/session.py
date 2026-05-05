@@ -253,6 +253,25 @@ def get_window_rect(hwnd: int) -> Rect:
     return win32gui.GetWindowRect(hwnd)
 
 
+def is_iconic(hwnd: int) -> bool:
+    """True when the window is currently minimized."""
+    try:
+        return bool(win32gui.IsIconic(hwnd))
+    except Exception:
+        return False
+
+
+def is_foreground(hwnd: int) -> bool:
+    """True when the given HWND owns the foreground input focus."""
+    try:
+        user32 = ctypes.windll.user32
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        fg = user32.GetForegroundWindow()
+        return fg is not None and int(fg) == int(hwnd)
+    except Exception:
+        return False
+
+
 def relative_to_absolute(rect: Rect, rel_x: int, rel_y: int) -> tuple[int, int]:
     """Convert (x, y) relative to a window's top-left into absolute screen coords."""
     return rect[0] + rel_x, rect[1] + rel_y
@@ -412,6 +431,8 @@ __all__ = [
     "focus_window",
     "get_window_rect",
     "hotkey",
+    "is_foreground",
+    "is_iconic",
     "load_config",
     "open_remote_start",
     "press",
