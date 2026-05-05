@@ -172,7 +172,96 @@ options, in order of practicality:
 | **B. Run tests inside the devbox** | Don't drive remotely at all. Trigger from Windows App / scheduled task, push results out to a blob store / GitHub. | Low | Loses the "drive from laptop" goal but is bulletproof. |
 | **C. Fall back to `poc/rdp-pixel`** | Use the previous POC. Windows App is the only inbound path Dev Box allows, so drive its pixels. | Zero \u2014 already built | Has all the documented caveats (DPI, window must stay visible, etc.). |
 
-Recommended next experiment: try **A. reverse tunnel** with Cloudflare
-Tunnel (free, no inbound port needed). If the devbox can `cloudflared
-tunnel run`, the relay path proves the laptop can talk to the agent
-indirectly. That becomes the production transport pattern.
+### Run 2 — confirm & give up on direct inbound
+
+After updating `devbox_host` to the devbox's IPv4 from `ipconfig`:
+
+- Devbox `ipconfig` showed two IPs:
+  - `10.30.1.133` on the real network adapter (this is **private** \u2014 the
+    `10.0.0.0/8` block is RFC1918, not public).
+  - `172.26.144.1` on `vEthernet (Default Switch)` \u2014 Hyper-V internal
+    virtual switch, only reachable from the devbox itself.
+- Laptop `Test-NetConnection 10.30.1.133 -Port 8765`:
+  - `SourceAddress: 100.79.200.91` via `MSFT-AzVPN-Manual` (laptop is on
+    the corp Azure VPN).
+  - `PingSucceeded: False`, `TcpTestSucceeded: False`.
+
+**Conclusion:** direct inbound IP path is not viable on this devbox.
+Microsoft Dev Box VMs live in a Microsoft-managed VNet that the corp
+Azure VPN does not route into. No guest-OS firewall change, port change,
+or config tweak can fix that. Even ICMP fails \u2014 there is no IP route at
+all from laptop to devbox subnet.
+
+### Decision
+
+Direct-inbound TCP from laptop to devbox: **dead end**. Move to a reverse
+tunnel for any future agent-based attempt.
+
+## Reverse-tunnel recipe (next experiment)
+
+The agent code as-is can stay; only the transport changes. Devbox dials
+out (which works \u2014 RDP itself proves outbound is open) to a public
+relay; laptop hits the relay's public URL.
+
+```
+[Laptop]                       [Cloudflare]                       [Devbox]
+client/demo.py --HTTPS--> https://random.trycloudflare.com <--outbound HTTPS-- cloudflared
+                                                                       |
+                                                                       v
+                                                               http://127.0.0.1:8765
+                                                               (existing agent)
+```
+
+### Devbox-side, one-time
+
+```powershell
+winget install --id Cloudflare.cloudflared
+```
+
+### Devbox-side, every test session
+
+Two terminals (both inside the Windows App session):
+
+```powershell
+# terminal 1 \u2014 the agent (unchanged)
+$env:GAZE_TOKEN = "use-a-long-random-string"
+python server.py --port 8765
+
+# terminal 2 \u2014 the tunnel
+cloudflared tunnel --url http://localhost:8765
+```
+
+The tunnel command prints a URL like
+`https://random-words.trycloudflare.com`. Copy it.
+
+### Laptop-side
+
+Edit `config.ini`:
+
+```ini
+[connection]
+# Use the Cloudflare URL instead of the devbox IP. Note: scheme + host only;
+# do NOT include a port. Cloudflare terminates TLS on 443 and forwards to
+# the agent's local 8765.
+devbox_host = random-words.trycloudflare.com
+devbox_port = 443
+token = same-as-GAZE_TOKEN-on-devbox
+```
+
+> **Heads up:** `check_connectivity.py` and `demo.py` currently build URLs
+> as `http://{host}:{port}`. To use the Cloudflare URL you need either
+> (a) a tiny code change to use `https` when port is 443, or (b) point the
+> client at `http://localhost:<some-port>` after running a `cloudflared
+> access tcp` client on the laptop. The minimum-effort change is (a) \u2014
+> a one-line scheme switch in both client scripts. Left as a follow-up
+> per current decision to not change code yet.
+
+### Caveats
+
+- `trycloudflare.com` URLs are **anonymous and ephemeral** \u2014 fine for a
+  POC, not for production. For longer-term use, register a Cloudflare
+  account and create a named tunnel bound to your own subdomain.
+- Anyone who guesses the random URL hits the agent. The bearer token is
+  still your only auth \u2014 keep `GAZE_TOKEN` long and random, rotate often.
+- Outbound HTTPS to `*.cloudflare.com` must be allowed from the devbox.
+  Most corp networks allow this; a few don't.
