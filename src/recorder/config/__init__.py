@@ -1,0 +1,39 @@
+"""Configuration & static constants for the recorder.
+
+Re-exports everything from `settings`, `theme`, and `key_mappings` so the
+rest of the codebase can keep doing `from recorder.config import COLORS,
+STOP_HOTKEY` etc.
+"""
+
+from .settings import (  # noqa: F401
+    PYAUTOGUI_PAUSE,
+    PLAYBACK_SLEEP_INCREMENT,
+    VERIFY_BEFORE_ACTION,
+    VERIFY_METHOD,
+    VERIFY_TOLERANCE_PCT,
+    VERIFY_PIXEL_THRESHOLD,
+    VERIFY_PHASH_MAX_DISTANCE,
+    VERIFY_ON_MISMATCH,
+    MINIMIZE_DURING_PLAYBACK,
+    WORKER_JOIN_TIMEOUT,
+    SCREENSHOT_HASH_LENGTH,
+    POST_INJECT_SETTLE_SECONDS,
+    TEXT_BUFFER_IDLE_FLUSH_SECONDS,
+    CAPTURE_BEFORE_SCREENSHOTS,
+    STABLE_POLL_INTERVAL_SECONDS,
+    STABLE_MAX_WAIT_SECONDS,
+    STABLE_PHASH_DISTANCE,
+    WINDOW_TITLE,
+    RECORDINGS_DIR_NAME,
+    INFO_WRAPLENGTH,
+    TARGET_WINDOW_TITLE_CONTAINS,
+    TARGET_WINDOW_FULLSCREEN_ONLY,
+    TARGET_WINDOW_AUTO_LAUNCH_URI,
+    TARGET_WINDOW_STOP_ON_FOCUS_LOSS,
+    TARGET_WINDOW_STOP_ON_MINIMIZE,
+    STOP_HOTKEY,
+    apply_runtime_settings,
+    save_to_disk,
+)
+from .theme import COLORS, FONT_FAMILY, THUMBNAIL_SIZE  # noqa: F401
+from .key_mappings import PYNPUT_TO_PYAUTOGUI  # noqa: F401
