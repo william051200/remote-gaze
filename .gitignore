@@ -5,13 +5,5 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# POC outputs
-poc/out/*.png
-agent_poc/client/out/*.png
-
 # Recorder outputs
 recordings/
-
-# Local-only configs (may contain secrets / per-user paths)
-poc/config.ini
-agent_poc/**/config.ini

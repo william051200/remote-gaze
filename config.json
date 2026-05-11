@@ -1,13 +1,24 @@
 {
   "playback": {
     "pyautogui_pause": 0.05,
-    "sleep_increment": 0.1
+    "sleep_increment": 0.1,
+    "verify_before_action": true,
+    "verify_method": "phash",
+    "verify_tolerance_pct": 25.0,
+    "verify_pixel_threshold": 16,
+    "verify_phash_max_distance": 60,
+    "verify_on_mismatch": "halt",
+    "minimize_during_playback": false
   },
   "recording": {
     "worker_join_timeout": 5.0,
     "screenshot_hash_length": 16,
     "post_inject_settle_seconds": 0.1,
-    "text_buffer_idle_flush_seconds": 1.5
+    "text_buffer_idle_flush_seconds": 1.5,
+    "capture_before_screenshots": true,
+    "stable_poll_interval_seconds": 0.05,
+    "stable_max_wait_seconds": 0.8,
+    "stable_phash_distance": 8
   },
   "application": {
     "window_title": "RemoteGaze Recorder",
@@ -16,7 +27,7 @@
     "info_wraplength": 800
   },
   "target_window": {
-    "title_contains": "test",
+    "title_contains": "Test",
     "fullscreen_only": true,
     "auto_launch_uri": "",
     "stop_on_focus_loss": true,

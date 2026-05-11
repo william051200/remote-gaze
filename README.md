@@ -23,7 +23,7 @@ A desktop app that records mouse/keyboard interactions with coordinates, timesta
 
 ```bash
 pip install -r requirements.txt
-py -m recorder
+py -m src.recorder
 ```
 
 ### How It Works
