@@ -1,33 +1,26 @@
-"""Allow running with: py -m recorder"""
+"""Entry point for the RemoteGaze Recorder.
 
-# Enable per-monitor DPI awareness BEFORE any other import. Importing
-# tkinter / pyautogui can lock the process to "system DPI aware", which
-# breaks coordinates on secondary monitors with different scaling.
-import sys as _sys
-if _sys.platform == "win32":
-    import ctypes as _ctypes
-    _u32 = _ctypes.windll.user32
-    _set = False
-    try:
-        _u32.SetProcessDpiAwarenessContext.argtypes = [_ctypes.c_void_p]
-        _u32.SetProcessDpiAwarenessContext.restype = _ctypes.c_int
-        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
-        _set = bool(_u32.SetProcessDpiAwarenessContext(
-            _ctypes.c_void_p(-4 & 0xFFFFFFFFFFFFFFFF)))
-    except Exception:
-        pass
-    if not _set:
-        try:
-            _ctypes.windll.shcore.SetProcessDpiAwareness(2)
-            _set = True
-        except Exception:
-            pass
-    if not _set:
-        try:
-            _u32.SetProcessDPIAware()
-        except Exception:
-            pass
+Runs when the package is invoked with ``py -m src.recorder``. Python
+sets ``__name__ == "__main__"`` on this file in that case, so the guard
+at the bottom fires.
+"""
 
-from .main import main
+# Side-effect import: enables per-monitor DPI awareness BEFORE tkinter,
+# pyautogui, or PIL are loaded by the imports below. Must stay first.
+from . import _dpi  # noqa: F401
 
-main()
+from pathlib import Path
+
+from .ui.controller import RecorderGUI
+from .config import RECORDINGS_DIR_NAME
+
+
+def main() -> None:
+    output_dir = Path(__file__).resolve().parent.parent / RECORDINGS_DIR_NAME
+    output_dir.mkdir(exist_ok=True)
+    app = RecorderGUI(output_dir=output_dir)
+    app.run()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,4 +1,4 @@
-"""Shared helpers for the Windows-App pixel-driving POC scripts.
+"""Shared helpers for driving a Windows-App / RDP session by pixels.
 
 Importing this module enables Per-Monitor V2 DPI awareness as a side effect.
 That MUST happen before any screen / input / window-rect call, otherwise
@@ -7,10 +7,10 @@ uses physical pixels, EnumWindows / GetWindowRect / Pillow.ImageGrab use
 DPI-scaled pixels) and clicks land in the wrong place on high-DPI monitors.
 
 Public API:
-    Config            - typed view over config.ini
-    load_config(path) - parse and validate a config file
     find_session_window(title_substring) -> hwnd or None
     focus_window(hwnd)
+    is_iconic(hwnd) -> bool
+    is_foreground(hwnd) -> bool
     get_window_rect(hwnd) -> (left, top, right, bottom)
     relative_to_absolute(rect, x, y) -> (abs_x, abs_y)
     click_at(abs_x, abs_y)
@@ -25,15 +25,11 @@ Public API:
 
 from __future__ import annotations
 
-import configparser
 import ctypes
 import os
 import subprocess
-import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
 # ---------------------------------------------------------------------------
 # DPI awareness - MUST run before any screen / input / window-rect import.
@@ -74,81 +70,10 @@ pyautogui.FAILSAFE = False
 
 
 # ---------------------------------------------------------------------------
-# Config
+# Types
 # ---------------------------------------------------------------------------
 
 Rect = tuple[int, int, int, int]
-
-
-@dataclass(frozen=True)
-class Config:
-    """All knobs in one place, populated from config.ini."""
-
-    # [connection]
-    window_title_contains: str
-    launch_uri: str
-
-    # [action]  (rdp_click.py)
-    click_x: int
-    click_y: int
-    type_text: str
-
-    # [notepad]  (open_notepad.py)
-    start_method: str  # "win" or "alt-home"
-    app_name: str
-    write_text: str
-    close_x: int
-    close_y: int
-
-    # [timing]
-    focus_delay: float
-    settle_delay: float
-    start_wait: float
-    launch_wait: float
-    write_wait: float
-    close_wait: float
-
-    # [output]
-    screenshot_path: Path
-    notepad_screenshot_path: Path
-
-
-def load_config(path: Path) -> Config:
-    if not path.exists():
-        sys.exit(f"config file not found: {path}")
-    cp = configparser.ConfigParser()
-    cp.read(path, encoding="utf-8")
-
-    # Ensure optional sections exist so .get(..., fallback=) works uniformly.
-    for section in ("connection", "action", "notepad", "timing", "output"):
-        if not cp.has_section(section):
-            cp.add_section(section)
-
-    try:
-        return Config(
-            window_title_contains=cp.get("connection", "window_title_contains").strip(),
-            launch_uri=cp.get("connection", "launch_uri", fallback="").strip(),
-            click_x=cp.getint("action", "click_x", fallback=200),
-            click_y=cp.getint("action", "click_y", fallback=200),
-            type_text=cp.get("action", "type_text", fallback=""),
-            start_method=cp.get("notepad", "start_method", fallback="alt-home").strip(),
-            app_name=cp.get("notepad", "app_name", fallback="notepad").strip(),
-            write_text=cp.get("notepad", "write_text", fallback="hello world"),
-            close_x=cp.getint("notepad", "close_x", fallback=1600),
-            close_y=cp.getint("notepad", "close_y", fallback=200),
-            focus_delay=cp.getfloat("timing", "focus_delay", fallback=1.0),
-            settle_delay=cp.getfloat("timing", "settle_delay", fallback=1.5),
-            start_wait=cp.getfloat("timing", "start_wait", fallback=0.8),
-            launch_wait=cp.getfloat("timing", "launch_wait", fallback=2.5),
-            write_wait=cp.getfloat("timing", "write_wait", fallback=0.5),
-            close_wait=cp.getfloat("timing", "close_wait", fallback=1.0),
-            screenshot_path=Path(cp.get("output", "screenshot_path", fallback="poc/out/screenshot.png")),
-            notepad_screenshot_path=Path(
-                cp.get("output", "notepad_screenshot_path", fallback="poc/out/notepad_after.png")
-            ),
-        )
-    except (configparser.NoSectionError, configparser.NoOptionError, KeyError) as exc:
-        sys.exit(f"config file {path} is missing required key: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +111,69 @@ def find_session_window(title_substring: str) -> int | None:
     return matches[0]
 
 
+def _restore_if_minimized(hwnd: int, *, timeout: float = 1.5) -> bool:
+    """Force-restore ``hwnd`` if it is minimized.
+
+    Returns True when the window is no longer iconic (or wasn't iconic
+    to begin with). UWP/AppContainer windows like the "Windows App"
+    session host don't always honour a single ``ShowWindow(SW_RESTORE)``
+    -- they're hosted by ApplicationFrameHost.exe and the restore can be
+    swallowed if the window manager is busy. We retry with
+    ``ShowWindowAsync`` and ``SwitchToThisWindow`` and poll
+    ``IsIconic`` + ``GetWindowRect`` until the parking rect
+    ``(-32000, -32000)`` goes away.
+    """
+    try:
+        if not win32gui.IsIconic(hwnd):
+            return True
+    except Exception:
+        return False
+
+    user32 = ctypes.windll.user32
+    deadline = time.monotonic() + max(0.0, timeout)
+    attempt = 0
+    methods = ["ShowWindow(SW_RESTORE)", "ShowWindowAsync(SW_RESTORE)",
+               "ShowWindowAsync(SW_SHOWNORMAL)", "SwitchToThisWindow"]
+    while time.monotonic() < deadline:
+        method = methods[min(attempt, len(methods) - 1)]
+        try:
+            if attempt == 0:
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            elif attempt == 1:
+                user32.ShowWindowAsync(hwnd, win32con.SW_RESTORE)
+            elif attempt == 2:
+                user32.ShowWindowAsync(hwnd, win32con.SW_SHOWNORMAL)
+            else:
+                # SwitchToThisWindow with fAltTab=True acts like an
+                # Alt-Tab to the window; the shell honours it even when
+                # ShowWindow is being ignored by ApplicationFrameHost.
+                user32.SwitchToThisWindow(hwnd, True)
+        except Exception as exc:
+            print(f"[restore] {method} raised: {exc}")
+
+        attempt += 1
+        end_attempt = min(deadline, time.monotonic() + 0.4)
+        while time.monotonic() < end_attempt:
+            time.sleep(0.05)
+            try:
+                if not win32gui.IsIconic(hwnd):
+                    l, t, r, b = win32gui.GetWindowRect(hwnd)
+                    if l > -10000 and t > -10000 and (r - l) > 0 and (b - t) > 0:
+                        print(f"[restore] hwnd {hwnd} on-screen via {method} "
+                              f"rect=({l},{t},{r},{b})")
+                        return True
+            except Exception:
+                pass
+
+    try:
+        still_iconic = win32gui.IsIconic(hwnd)
+    except Exception:
+        still_iconic = True
+    print(f"[restore] FAILED to un-minimize hwnd {hwnd} after {timeout:.1f}s "
+          f"(iconic={still_iconic})")
+    return not still_iconic
+
+
 def focus_window(hwnd: int) -> None:
     """Restore (if minimized) and bring `hwnd` to the true foreground.
 
@@ -203,8 +191,10 @@ def focus_window(hwnd: int) -> None:
     After this, `GetForegroundWindow() == hwnd` should hold.
     """
     try:
-        if win32gui.IsIconic(hwnd):
-            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+        # Robust restore for UWP/AppContainer windows -- a single
+        # SW_RESTORE is unreliable for ApplicationFrameHost-hosted
+        # windows like "Windows App".
+        _restore_if_minimized(hwnd)
 
         # 1) Alt-tap to bypass the SetForegroundWindow restriction.
         try:
@@ -383,57 +373,19 @@ def screenshot_looks_blank(path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Convenience: focus the configured session window or fail fast
+# Re-exports
 # ---------------------------------------------------------------------------
 
-
-class SessionError(SystemExit):
-    """Raised (as SystemExit) when the session window can't be used."""
-
-
-def focus_session(cfg: Config) -> tuple[int, Rect]:
-    """Find, focus, and return (hwnd, rect) for the configured session window.
-
-    Raises SessionError (which is a SystemExit subclass with an exit code)
-    when the window can't be found or is too small.
-    """
-    print(f"[info] looking for window matching: {cfg.window_title_contains!r}")
-    hwnd = find_session_window(cfg.window_title_contains)
-    if hwnd is None:
-        raise SessionError(
-            f"[FAIL] no visible window title contains "
-            f"{cfg.window_title_contains!r}. Open the session in Windows App and retry.",
-        )
-
-    title = win32gui.GetWindowText(hwnd)
-    print(f"[info] found window hwnd={hwnd} title={title!r}")
-
-    focus_window(hwnd)
-    time.sleep(cfg.focus_delay)
-
-    rect = get_window_rect(hwnd)
-    print(f"[info] window rect (L,T,R,B) = {rect}")
-    if rect[2] - rect[0] < 50 or rect[3] - rect[1] < 50:
-        raise SessionError("[FAIL] window rect is tiny; is the session minimized?")
-
-    return hwnd, rect
-
-
-# Re-export for convenience
 __all__ = [
-    "Config",
     "Rect",
-    "SessionError",
     "best_effort_launch",
     "click_at",
     "find_session_window",
-    "focus_session",
     "focus_window",
     "get_window_rect",
     "hotkey",
     "is_foreground",
     "is_iconic",
-    "load_config",
     "open_remote_start",
     "press",
     "relative_to_absolute",
@@ -441,8 +393,3 @@ __all__ = [
     "screenshot_region",
     "type_text",
 ]
-
-
-def _unused() -> None:
-    # silence unused import warnings for re-exports we keep available
-    _ = Iterable
