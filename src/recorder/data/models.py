@@ -12,7 +12,17 @@ class RecordedEvent:
     type: str  # "mouse_click" | "type_text" | "key_press" | "hotkey"
     timestamp: float  # seconds since recording start
     delay_from_previous: float
-    screenshot: str  # hash key referencing Recording.screenshots
+    # Hash key into Recording.screenshots for the AFTER-action screenshot
+    # (taken post-settle by the worker). Always present for events recorded
+    # after this field was introduced.
+    after_screenshot: str = ""
+    # Hash key into Recording.screenshots for the BEFORE-action screenshot
+    # (taken in the listener thread microseconds after the event arrives,
+    # before the worker fires). Optional: may be absent on legacy
+    # recordings or when capture_before_screenshots is disabled. Used by
+    # playback to verify the screen is in the expected state before
+    # injecting the action.
+    before_screenshot: Optional[str] = None
     x: Optional[int] = None
     y: Optional[int] = None
     button: Optional[str] = None  # "left", "right", "middle"
@@ -24,12 +34,23 @@ class RecordedEvent:
     # Canonical names: ctrl, alt, shift, win.
     modifiers: Optional[list] = None
 
+    @property
+    def screenshot(self) -> str:
+        """Backward-compatible alias for ``after_screenshot``."""
+        return self.after_screenshot
+
     def to_dict(self) -> dict:
         d = asdict(self)
-        return {k: v for k, v in d.items() if v is not None}
+        return {k: v for k, v in d.items() if v is not None and v != ""}
 
     @classmethod
     def from_dict(cls, data: dict) -> "RecordedEvent":
+        # Back-compat: older recordings used "screenshot" for the after-shot.
+        data = dict(data)
+        if "screenshot" in data and "after_screenshot" not in data:
+            data["after_screenshot"] = data.pop("screenshot")
+        else:
+            data.pop("screenshot", None)
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 

@@ -8,15 +8,16 @@ from typing import Callable, Optional
 
 import pyautogui
 
-from .models import Recording, RecordedEvent
-from .utils import load_recording
-from .config import PYAUTOGUI_PAUSE
-from . import config
-from .key_mappings import PYNPUT_TO_PYAUTOGUI
+from ..data.models import Recording, RecordedEvent
+from ..data.utils import load_recording
+from ..config import PYAUTOGUI_PAUSE
+from .. import config
+from ..config.key_mappings import PYNPUT_TO_PYAUTOGUI
 from .target_window import TargetWindow
+from . import verification
 
 # Win-key names (raw pynput names + pyautogui name) that should be routed
-# through gaze.session.open_remote_start("win") so they get the 80 ms hold
+# through platform.session.open_remote_start("win") so they get the 80 ms hold
 # Windows App's RDP needs to forward them to the remote session.
 _WIN_KEY_NAMES = {"cmd", "cmd_l", "cmd_r", "winleft", "winright"}
 
@@ -63,9 +64,26 @@ def _native_click(x: int, y: int, button: str) -> None:
 
 class EventPlayer:
     def __init__(self, on_step: Optional[Callable[[RecordedEvent, int, "Recording"], None]] = None,
-                 on_complete: Optional[Callable[[], None]] = None):
-        self.on_step = on_step  # callback(event, total_steps, recording)
+                 on_complete: Optional[Callable[[str], None]] = None,
+                 on_verification_fail: Optional[Callable[[RecordedEvent, str, object, object], None]] = None,
+                 on_step_verified: Optional[Callable[[RecordedEvent, int, int, "Recording", object, object, Optional[str], bool], None]] = None):
+        # callback(event, total_steps, recording)
+        self.on_step = on_step
+        # callback(status) where status ∈ {"completed","stopped","verification_failed"}
         self.on_complete = on_complete
+        # callback(event, diff_text, expected_image, live_image) on
+        # pre-action verification failure (called before halting).
+        # diff_text is pre-formatted by the comparison helper so the UI
+        # doesn't need to know which method ran (e.g. "3.21%" or
+        # "60 / 324 bits").
+        self.on_verification_fail = on_verification_fail
+        # callback(event, idx, total, recording, expected_or_None,
+        # live_or_None, diff_text_or_None, passed) fired AFTER each
+        # verification attempt (success or fail) AND for events without
+        # verification (with all None / passed=True). Lets the GUI cache
+        # the pre-action images so step display + browse + fail-state
+        # all share the same baseline as verification.
+        self.on_step_verified = on_step_verified
         self._thread: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
         self._running = False
@@ -107,10 +125,16 @@ class EventPlayer:
                 )
                 self._running = False
                 if self.on_complete:
-                    self.on_complete()
+                    self.on_complete("stopped")
                 return
             target.focus()
             time.sleep(0.3)
+            # focus() may have called SW_RESTORE on a minimized window;
+            # the rect we cached during refresh() is the pre-restore
+            # off-screen rect (-32000, -32000, ...). Re-read it now that
+            # the window is visible so the warm-up click and all
+            # subsequent window-relative clicks land in the right spot.
+            target.refresh()
             # Warm-up click in the center of the window so Windows App
             # gives the remote desktop keyboard focus. Without this, the
             # first Win-key/Alt-Home goes to the container chrome.
@@ -130,9 +154,18 @@ class EventPlayer:
                         f"may not line up"
                     )
 
+        # Model B's warm-up click can mutate the screen between record-
+        # time and playback-time, so skip BEFORE-verification on the first
+        # event for window-relative recordings.
+        warmup_skipped_event_index = 0 if (target is not None) else -1
+        # Final status reported via on_complete. Defaults to completed;
+        # set to "stopped" on stop_flag, "verification_failed" on halt.
+        status = "completed"
+
         try:
-            for event in recording.events:
+            for idx, event in enumerate(recording.events):
                 if self._stop_flag.is_set():
+                    status = "stopped"
                     break
 
                 # Wait for the recorded delay
@@ -144,14 +177,61 @@ class EventPlayer:
                         remaining -= config.PLAYBACK_SLEEP_INCREMENT
 
                 if self._stop_flag.is_set():
+                    status = "stopped"
                     break
+
+                # ── BEFORE-action verification ─────────────────────────
+                cap_state = {"expected": None, "live": None,
+                             "diff_text": None, "passed": True}
+
+                def _capture_cb(_ev, expected, live, diff_text, passed,
+                                state=cap_state):
+                    state["expected"] = expected
+                    state["live"] = live
+                    state["diff_text"] = diff_text
+                    state["passed"] = passed
+
+                if verification.should_verify(
+                    event, recording, warmup_skipped_event_index, idx,
+                ):
+                    halted = verification.verify_before_event(
+                        event, recording, target,
+                        self._stop_flag, self.on_verification_fail,
+                        on_capture=_capture_cb,
+                    )
+                    if halted:
+                        # Verification failed and policy is halt.
+                        # on_step_verified still fires so the GUI caches
+                        # the captures alongside the fail banner.
+                        if self.on_step_verified:
+                            try:
+                                self.on_step_verified(
+                                    event, idx, total, recording,
+                                    cap_state["expected"], cap_state["live"],
+                                    cap_state["diff_text"], cap_state["passed"],
+                                )
+                            except Exception:
+                                pass
+                        status = "verification_failed"
+                        break
+                    if self._stop_flag.is_set():
+                        status = "stopped"
+                        break
+
+                if self.on_step_verified:
+                    try:
+                        self.on_step_verified(
+                            event, idx, total, recording,
+                            cap_state["expected"], cap_state["live"],
+                            cap_state["diff_text"], cap_state["passed"],
+                        )
+                    except Exception:
+                        pass
 
                 self._execute_event(event, target)
 
-                # Match the recorder's settle-then-screenshot timing so the
-                # GUI's "current" snapshot lines up with the "expected" one.
-                if config.POST_INJECT_SETTLE_SECONDS > 0:
-                    time.sleep(config.POST_INJECT_SETTLE_SECONDS)
+                # Stable-capture in the GUI's _on_playback_step now waits
+                # for the screen to settle, so no explicit sleep here.
 
                 if self.on_step:
                     try:
@@ -161,7 +241,19 @@ class EventPlayer:
         finally:
             self._running = False
             if self.on_complete:
-                self.on_complete()
+                self.on_complete(status)
+
+    def _verify_before(self, event: RecordedEvent, recording: Recording,
+                       target: Optional[TargetWindow]) -> bool:
+        """Deprecated thin wrapper kept for backward compatibility.
+
+        The verification logic now lives in
+        :mod:`recorder.engine.verification`. Callers should prefer
+        ``verification.verify_before_event`` directly.
+        """
+        return verification.verify_before_event(
+            event, recording, target, self._stop_flag, self.on_verification_fail,
+        )
 
     @staticmethod
     def _map_key(key_name: str) -> str:
@@ -211,7 +303,7 @@ class EventPlayer:
             # to the remote session. Plain pyautogui.press is too fast.
             if event.key in _WIN_KEY_NAMES:
                 try:
-                    from gaze import session as gaze_session
+                    from ..platform import session as gaze_session
                     gaze_session.open_remote_start("win")
                 except Exception:
                     pyautogui.press("winleft")

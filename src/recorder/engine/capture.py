@@ -25,10 +25,15 @@ from typing import Callable, Optional
 
 from pynput import keyboard, mouse
 
-from .config import WORKER_JOIN_TIMEOUT
-from . import config
-from .models import RecordedEvent, Recording
-from .utils import encode_screenshot, save_recording, take_screenshot
+from ..config import WORKER_JOIN_TIMEOUT
+from .. import config
+from ..data.models import RecordedEvent, Recording
+from ..data.utils import (
+    encode_screenshot,
+    save_recording,
+    take_screenshot,
+    take_stable_screenshot,
+)
 
 _MODIFIER_NAMES = {
     "ctrl", "ctrl_l", "ctrl_r",
@@ -125,6 +130,21 @@ class EventRecorder:
         self._text_timestamp: float = 0.0
         self._text_delay: float = 0.0
         self._idle_timer: Optional[threading.Timer] = None
+        # Worker-side handoff of the BEFORE-screenshot image for the
+        # in-flight text run (set by listener thread, consumed by worker).
+        # Carrying the raw PIL.Image (not an encoded hash) keeps the
+        # listener thread fast -- encoding/dedup happens on the worker.
+        self._pending_text_before = None  # Optional[PIL.Image.Image]
+        # Worker-side: the BEFORE-screenshot image for the current text
+        # run, captured at the first char and encoded/stored on flush.
+        self._text_before_image = None  # Optional[PIL.Image.Image]
+
+        # Listener-side flag indicating a text run is in progress. Used to
+        # decide whether to capture a before-screenshot when a printable
+        # char arrives. Mutated by the listener thread (and the idle Timer
+        # thread, via _listener_flush_text); reads/writes of a Python bool
+        # are atomic enough for this use.
+        self._listener_text_run_active: bool = False
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -168,6 +188,9 @@ class EventRecorder:
         self._mods_down.clear()
         self._mods_unused.clear()
         self._text_buffer.clear()
+        self._text_before_image = None
+        self._pending_text_before = None
+        self._listener_text_run_active = False
 
         self._event_queue = queue.Queue()
         self._worker_thread = threading.Thread(target=self._event_worker, daemon=True)
@@ -195,7 +218,7 @@ class EventRecorder:
         self._cancel_idle_timer()
 
         # Flush any pending typed-text buffer before draining the queue.
-        self._event_queue.put(("flush_text", None))
+        self._listener_flush_text()
         self._event_queue.put((None, None))  # sentinel
         if self._worker_thread:
             self._worker_thread.join(timeout=WORKER_JOIN_TIMEOUT)
@@ -206,6 +229,45 @@ class EventRecorder:
         return None
 
     # ── listener callbacks (pynput hook threads) ──────────────────────
+
+    def _listener_flush_text(self) -> None:
+        """Listener-thread helper: queue a text flush AND clear the
+        listener-side text-run flag so the next printable char triggers
+        a fresh before-screenshot capture."""
+        self._listener_text_run_active = False
+        self._event_queue.put(("flush_text", None))
+
+    def _capture_before_for_listener(self):
+        """Capture a BEFORE-screenshot from a listener thread.
+
+        Returns the raw PIL.Image (or ``None`` if disabled/failed). The
+        listener intentionally does a single fast ``take_screenshot``
+        rather than ``take_stable_screenshot`` -- the BEFORE shot is
+        meant to capture the screen *the moment the input was
+        dispatched*, and stable-polling (up to ~0.8 s) inside the pynput
+        hook callback is the dominant source of recording lag because
+        the OS input pump is held up while the hook runs.
+
+        Encoding (SHA-256 + base64 + dedup-store on the recording) is
+        deferred to the worker thread via ``_store_image`` so the
+        listener returns as quickly as possible.
+        """
+        if not config.CAPTURE_BEFORE_SCREENSHOTS:
+            return None
+        try:
+            region = self._capture_region()
+            return take_screenshot(region=region)
+        except Exception:
+            return None
+
+    def _capture_region(self):
+        """Return (x, y, w, h) crop region for screenshots, or None."""
+        if self.target_window is not None and self.target_window.rect is not None:
+            return self.target_window.screenshot_region()
+        if self.monitor is not None:
+            return (self.monitor.x, self.monitor.y,
+                    self.monitor.width, self.monitor.height)
+        return None
 
     def _on_mouse_click(self, x: int, y: int, button: mouse.Button, pressed: bool) -> None:
         if not pressed or not self._running:
@@ -225,8 +287,13 @@ class EventRecorder:
                 return
             rec_x, rec_y = self.target_window.to_relative(int(x), int(y))
         # Any mouse click ends a typing run.
-        self._event_queue.put(("flush_text", None))
-        payload = {"x": rec_x, "y": rec_y, "button": button.name}
+        self._listener_flush_text()
+        # Capture BEFORE-screenshot in the listener thread, microseconds
+        # after the OS dispatched the click so the screen has had at most
+        # one frame to react. Encoding/dedup happens later on the worker.
+        before_image = self._capture_before_for_listener()
+        payload = {"x": rec_x, "y": rec_y, "button": button.name,
+                   "before_image": before_image}
         mods = _canon_mods(self._mods_down)
         if mods:
             payload["modifiers"] = mods
@@ -251,7 +318,7 @@ class EventRecorder:
             if name not in self._mods_down:
                 self._mods_down.add(name)
                 self._mods_unused.add(name)
-                self._event_queue.put(("flush_text", None))
+                self._listener_flush_text()
             return
 
         char = self._printable_char(key)
@@ -266,12 +333,19 @@ class EventRecorder:
             self._mods_unused.discard("shift")
             self._mods_unused.discard("shift_l")
             self._mods_unused.discard("shift_r")
+            # Capture BEFORE-screenshot at the START of a text run only.
+            # The chained chars form a single buffered "type_text" event,
+            # so one before-shot per run is what playback verifies against.
+            if not self._listener_text_run_active:
+                self._pending_text_before = self._capture_before_for_listener()
+                self._listener_text_run_active = True
             self._event_queue.put(("text_char", {"char": char}))
             return
 
         # Non-printable, or printable + Ctrl/Alt/Win. Either way, end any
         # ongoing typing run and emit the discrete event.
-        self._event_queue.put(("flush_text", None))
+        self._listener_flush_text()
+        before_image = self._capture_before_for_listener()
 
         if self._mods_down:
             # Any mod (including bare shift) makes this a chord. Examples:
@@ -287,10 +361,13 @@ class EventRecorder:
                 chord_key = chr(ord(chord_key) + ord("a") - 1)
             self._event_queue.put((
                 "hotkey",
-                {"key": chord_key, "modifiers": mods},
+                {"key": chord_key, "modifiers": mods,
+                 "before_image": before_image},
             ))
         else:
-            self._event_queue.put(("key_press", {"key": name}))
+            self._event_queue.put((
+                "key_press", {"key": name, "before_image": before_image},
+            ))
 
         # Whatever modifiers were held have now been consumed.
         self._mods_unused.clear()
@@ -312,8 +389,11 @@ class EventRecorder:
                 # tap. We emit the canonical name so the player can map it
                 # cleanly to pyautogui (e.g. cmd_l -> winleft).
                 self._mods_unused.discard(name)
-                self._event_queue.put(("flush_text", None))
-                self._event_queue.put(("key_press", {"key": name}))
+                self._listener_flush_text()
+                before_image = self._capture_before_for_listener()
+                self._event_queue.put((
+                    "key_press", {"key": name, "before_image": before_image},
+                ))
 
     # ── worker (sequential, owns screenshots) ─────────────────────────
 
@@ -343,6 +423,10 @@ class EventRecorder:
             self._text_step = step
             self._text_timestamp = timestamp
             self._text_delay = delay
+            # Consume the BEFORE-screenshot the listener captured at the
+            # start of this text run.
+            self._text_before_image = self._pending_text_before
+            self._pending_text_before = None
 
         self._text_buffer.append(char)
 
@@ -350,7 +434,7 @@ class EventRecorder:
         self._cancel_idle_timer()
         self._idle_timer = threading.Timer(
             config.TEXT_BUFFER_IDLE_FLUSH_SECONDS,
-            lambda: self._event_queue.put(("flush_text", None)),
+            self._listener_flush_text,
         )
         self._idle_timer.daemon = True
         self._idle_timer.start()
@@ -362,56 +446,59 @@ class EventRecorder:
         text = "".join(self._text_buffer)
         self._text_buffer.clear()
 
-        # Brief pause so the OS finishes painting the typed chars before we
-        # snapshot the screen.
-        time.sleep(config.POST_INJECT_SETTLE_SECONDS)
-        screenshot = self._capture_screenshot()
+        # Stable-capture polls until the screen stops animating, so no
+        # explicit pre-settle sleep is needed here anymore.
+        after = self._capture_screenshot()
+        before = self._store_image(self._text_before_image)
+        self._text_before_image = None
 
         self._append_event(RecordedEvent(
             step=self._text_step,
             type="type_text",
             timestamp=round(self._text_timestamp, 3),
             delay_from_previous=round(self._text_delay, 3),
-            screenshot=screenshot,
+            after_screenshot=after,
+            before_screenshot=before,
             text=text,
         ))
 
     def _handle_mouse_click(self, p: dict) -> None:
         step, timestamp, delay = self._allocate_step()
-        # Settle so any modifier-down + click effect has time to paint before
-        # we snapshot.
-        time.sleep(config.POST_INJECT_SETTLE_SECONDS)
-        screenshot = self._capture_screenshot()
+        after = self._capture_screenshot()
+        before = self._store_image(p.get("before_image"))
         self._append_event(RecordedEvent(
             step=step, type="mouse_click",
             timestamp=round(timestamp, 3),
             delay_from_previous=round(delay, 3),
-            screenshot=screenshot,
+            after_screenshot=after,
+            before_screenshot=before or None,
             x=p["x"], y=p["y"], button=p["button"],
             modifiers=p.get("modifiers"),
         ))
 
     def _handle_key_press(self, p: dict) -> None:
         step, timestamp, delay = self._allocate_step()
-        time.sleep(config.POST_INJECT_SETTLE_SECONDS)
-        screenshot = self._capture_screenshot()
+        after = self._capture_screenshot()
+        before = self._store_image(p.get("before_image"))
         self._append_event(RecordedEvent(
             step=step, type="key_press",
             timestamp=round(timestamp, 3),
             delay_from_previous=round(delay, 3),
-            screenshot=screenshot,
+            after_screenshot=after,
+            before_screenshot=before or None,
             key=p["key"],
         ))
 
     def _handle_hotkey(self, p: dict) -> None:
         step, timestamp, delay = self._allocate_step()
-        time.sleep(config.POST_INJECT_SETTLE_SECONDS)
-        screenshot = self._capture_screenshot()
+        after = self._capture_screenshot()
+        before = self._store_image(p.get("before_image"))
         self._append_event(RecordedEvent(
             step=step, type="hotkey",
             timestamp=round(timestamp, 3),
             delay_from_previous=round(delay, 3),
-            screenshot=screenshot,
+            after_screenshot=after,
+            before_screenshot=before or None,
             key=p["key"],
             modifiers=p.get("modifiers"),
         ))
@@ -429,15 +516,23 @@ class EventRecorder:
 
     def _capture_screenshot(self) -> str:
         try:
-            region = None
-            # Target window crops win over monitor crop when both are set.
-            if self.target_window is not None and self.target_window.rect is not None:
-                region = self.target_window.screenshot_region()
-            elif self.monitor is not None:
-                region = (self.monitor.x, self.monitor.y,
-                          self.monitor.width, self.monitor.height)
-            screenshot = take_screenshot(region=region)
-            hash_key, b64 = encode_screenshot(screenshot)
+            region = self._capture_region()
+            screenshot = take_stable_screenshot(
+                region=region,
+                poll_interval=config.STABLE_POLL_INTERVAL_SECONDS,
+                max_wait=config.STABLE_MAX_WAIT_SECONDS,
+                phash_distance=config.STABLE_PHASH_DISTANCE,
+            )
+            return self._store_image(screenshot) or ""
+        except Exception:
+            return ""
+
+    def _store_image(self, image) -> str:
+        """Encode + dedup a PIL.Image into the recording. Returns hash or ""."""
+        if image is None:
+            return ""
+        try:
+            hash_key, b64 = encode_screenshot(image)
             with self._lock:
                 if self.recording and hash_key not in self.recording.screenshots:
                     self.recording.screenshots[hash_key] = b64

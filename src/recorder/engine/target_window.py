@@ -1,6 +1,6 @@
 """Target window adapter for Model B.
 
-Wraps `gaze.session.find_session_window` / `get_window_rect` so the
+Wraps `platform.session.find_session_window` / `get_window_rect` so the
 recorder and player can:
   * locate the Microsoft Windows App session window by title substring
   * filter mouse events to those that fall inside that window
@@ -10,17 +10,9 @@ recorder and player can:
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Optional
 
-# Make repo root importable so `from gaze import session` works whether
-# the recorder is launched as `py -m recorder` or as a script.
-_REPO_ROOT = Path(__file__).resolve().parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-
-from gaze import session as gaze_session  # noqa: E402
+from ..platform import session as gaze_session
 
 
 class TargetWindow:
